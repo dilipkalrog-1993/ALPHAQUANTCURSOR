@@ -116,6 +116,7 @@ class DiscoveryPipeline:
 
         result.strategy_evaluated = len(focus_rows)
         result.strategy_signals = strategy_signals
+        result.candidates = len(self.aq.st.session_state.get("trade_candidates", {}))
         result.timings.full_strategies = time.perf_counter() - t3
         result.timings.total = time.perf_counter() - t0
         return result

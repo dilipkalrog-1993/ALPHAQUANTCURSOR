@@ -3,8 +3,8 @@
 Run:
     streamlit run app.py
 
-Legacy entry point `appemergentquant_v3_1.py` remains for historical reference
-but must not be used for new deployments.
+`appemergentquant_v3_1.py` is the canonical production application; this file
+is only a compatibility launcher for platforms configured to run ``app.py``.
 """
 
 from appemergentquant_v3_1 import main

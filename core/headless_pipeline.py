@@ -66,81 +66,6 @@ class StageAudit:
                 "rejections": self.rejections, "invariant_ok": self.input == self.output + self.rejected}
 
 
-def normalize_history(raw: Any) -> pd.DataFrame:
-    """Canonicalize a provider frame without inventing or forward-filling data."""
-    if raw is None:
-        return pd.DataFrame()
-    df = raw.copy()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    aliases = {str(c).strip().lower(): c for c in df.columns}
-    rename = {old: name for name in REQUIRED_OHLCV for old in [aliases.get(name.lower())] if old is not None}
-    df = df.rename(columns=rename)
-    df = df.loc[:, ~df.columns.duplicated()].sort_index()
-    df = df[~df.index.duplicated(keep="last")]
-    for col in REQUIRED_OHLCV:
-        if col in df:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df
-
-
-def _dates(df: pd.DataFrame) -> tuple[str | None, str | None, str | None]:
-    if df.empty:
-        return None, None, None
-    first, last = df.index[0], df.index[-1]
-    try:
-        end = pd.Timestamp(last)
-        if end.tzinfo is None:
-            end = end.tz_localize("UTC")
-        age = str(datetime.now(timezone.utc) - end.to_pydatetime()).split(".")[0]
-    except Exception:
-        age = None
-    return str(first), str(last), age
-
-
-def prepare_indicators(symbol: str, raw: Any, provider: str = "yfinance") -> tuple[pd.DataFrame | None, PipelineFailure | None]:
-    raw_rows = len(raw) if hasattr(raw, "__len__") else 0
-    df = normalize_history(raw)
-    first, last, age = _dates(df)
-    base = dict(symbol=symbol, provider=provider, raw_rows=raw_rows, normalized_rows=len(df),
-                first_date=first, last_date=last, data_age=age)
-    if df.empty:
-        return None, PipelineFailure(stage="download_normalization", reason="NO_HISTORY", detail="Provider returned no history", **base)
-    missing = [c for c in REQUIRED_OHLCV if c not in df.columns]
-    invalid = [c for c in REQUIRED_OHLCV if c in df and (df[c].isna().any() or not np.isfinite(df[c]).all())]
-    geometry_bad = all(c in df for c in ("High", "Low", "Open", "Close")) and bool(
-        ((df.High < df.Low) | (df.High < df[["Open", "Close"]].max(axis=1)) |
-         (df.Low > df[["Open", "Close"]].min(axis=1))).any())
-    if missing or invalid or geometry_bad:
-        detail = "Missing/invalid OHLCV" if not geometry_bad else "OHLC price geometry is invalid"
-        return None, PipelineFailure(stage="ohlcv_validation", reason="BAD_OHLCV", detail=detail,
-                                     missing_columns=missing, nan_columns=invalid, **base)
-    if len(df) < REQUIRED_ROWS:
-        return None, PipelineFailure(stage="minimum_history_validation", reason="INSUFFICIENT_ROWS",
-                                     detail=f"EMA200 requires >= {REQUIRED_ROWS} normalized rows", **base)
-    try:
-        out = df.copy()
-        out["EMA20"] = out.Close.ewm(span=20, adjust=False, min_periods=20).mean()
-        out["EMA50"] = out.Close.ewm(span=50, adjust=False, min_periods=50).mean()
-        out["EMA200"] = out.Close.ewm(span=200, adjust=False, min_periods=200).mean()
-        delta = out.Close.diff(); gain = delta.clip(lower=0); loss = -delta.clip(upper=0)
-        rs = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-        out["RSI"] = 100 - 100 / (1 + rs)
-        tr = pd.concat([(out.High-out.Low), (out.High-out.Close.shift()).abs(), (out.Low-out.Close.shift()).abs()], axis=1).max(axis=1)
-        out["ATR"] = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-        out["AVG_VOLUME20"] = out.Volume.rolling(20).mean()
-        required = ["EMA20", "EMA50", "EMA200", "RSI", "ATR", "AVG_VOLUME20"]
-        bad = [c for c in required if pd.isna(out[c].iloc[-1]) or not np.isfinite(out[c].iloc[-1])]
-        if bad:
-            return None, PipelineFailure(stage="indicator_preparation", reason="INDICATOR_NAN",
-                                         detail="Latest required indicator is NaN/non-finite", nan_columns=bad, **base)
-        return out, None
-    except Exception as exc:
-        return None, PipelineFailure(stage="indicator_preparation", reason="CALCULATION_FAILURE",
-                                     detail=f"Indicator calculation raised {type(exc).__name__}",
-                                     exception_type=type(exc).__name__, exception_message=str(exc), **base)
-
-
 def compute_candidate(symbol: str, df: pd.DataFrame) -> Candidate | None:
     """Create a candidate only from a real momentum/trend strategy signal."""
     row = df.iloc[-1]
@@ -173,3 +98,15 @@ def reconcile_candidates(backend: Iterable[Any], persisted: Iterable[Any], filte
             "hidden_by_filters": hidden,
             "notice": f"{hidden} valid setups are hidden by your saved Opportunity Filters." if hidden else "",
             "reset_filters_available": True, "displayed": displayed}
+
+
+# Compatibility imports. Production callers use core.history; keeping these
+# names avoids breaking older integrations while ensuring there is one path.
+def normalize_history(raw: Any) -> pd.DataFrame:
+    from core.history import normalize_history as canonical_normalize_history
+    return canonical_normalize_history(raw)
+
+
+def prepare_indicators(symbol: str, raw: Any, provider: str = "yfinance"):
+    from core.history import prepare_indicators as canonical_prepare_indicators
+    return canonical_prepare_indicators(symbol, raw, provider)

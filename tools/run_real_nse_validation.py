@@ -11,7 +11,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 
-from core.headless_pipeline import StageAudit, compute_candidate, prepare_indicators
+from core.production_engine import run_production_pipeline
 
 CACHE_DIR = ROOT / "data" / "history_cache"
 SOURCES = {
@@ -57,27 +57,13 @@ def run_universe(symbols: list[str], label: str) -> dict[str, Any]:
     with ThreadPoolExecutor(max_workers=min(8, len(symbols))) as pool:
         fetched = list(pool.map(fetch_history, symbols))
     fetch_seconds = time.perf_counter() - fetch_at
-    prepared, failures = {}, []
     prep_at = time.perf_counter()
-    for symbol, raw, provider in fetched:
-        df, failure = prepare_indicators(symbol, raw, provider)
-        if failure: failures.append(failure.to_dict())
-        else: prepared[symbol] = df
+    production = run_production_pipeline(fetched, focus_limit=28)
     prep_seconds = time.perf_counter() - prep_at
-    eligibility_rejections: dict[str,int] = {}
-    eligible = {}
-    for symbol, df in prepared.items():
-        reason = None
-        if float(df.Close.iloc[-1]) < 20: reason = "MINIMUM_PRICE"
-        elif float(df.AVG_VOLUME20.iloc[-1]) < 100_000: reason = "MINIMUM_AVERAGE_VOLUME"
-        if reason: eligibility_rejections[reason] = eligibility_rejections.get(reason,0)+1
-        else: eligible[symbol] = df
-    eligibility = StageAudit(len(prepared), len(eligible), eligibility_rejections)
-    ranked = sorted(eligible.items(), key=lambda x: float(x[1].AVG_VOLUME20.iloc[-1]) * float(x[1].Close.iloc[-1]), reverse=True)
-    focus = ranked[:28]
-    focus_audit = StageAudit(len(eligible), len(focus), {"FOCUS_LIMIT": max(0,len(eligible)-len(focus))})
-    candidates = [c for symbol, df in focus if (c := compute_candidate(symbol, df)) is not None]
-    strategy_audit = StageAudit(len(focus), len(candidates), {"NO_STRATEGY_SIGNAL": len(focus)-len(candidates)})
+    prepared = production["prepared"]; failures = production["failures"]
+    eligible = production["eligible"]; focus = production["focus"]
+    candidates = production["candidates"]
+    stages = production["diagnostics"].counts
     scores = [c.score for c in candidates]
     return {
         "label": label, "symbols_requested": len(symbols), "symbols_with_usable_data": len(prepared),
@@ -85,11 +71,23 @@ def run_universe(symbols: list[str], label: str) -> dict[str, Any]:
         "strategy_signals": len(candidates), "candidates": len(candidates),
         "counter_definitions": {"strategy_evaluated":"focus symbols on which enabled strategies ran", "strategy_signals":"symbols that triggered at least one strategy", "candidates":"computed, materialized candidates; exactly one per signalled symbol"},
         "failures": failures,
-        "stage_audits": {"history_to_indicators": StageAudit(len(symbols),len(prepared), _reason_counts(failures)).to_dict(), "eligibility":eligibility.to_dict(), "focus":focus_audit.to_dict(), "strategy":strategy_audit.to_dict()},
+        "stage_counts": stages,
+        "stage_audits": {
+            "history_to_indicators": _audit(len(symbols), len(prepared), _reason_counts(failures)),
+            "eligibility": _audit(len(prepared), len(eligible), production["eligibility_audit"].rejections),
+            "focus": _audit(len(eligible), len(focus), {"FOCUS_LIMIT": max(0, len(eligible)-len(focus))}),
+            "strategy": _audit(len(focus), len(candidates), {"NO_STRATEGY_SIGNAL": len(focus)-len(candidates)}),
+        },
         "score_distribution": distribution(scores),
         "score_summary": {"mean":round(mean(scores),2) if scores else None,"median":round(median(scores),2) if scores else None,"highest":max(scores) if scores else None,"lowest":min(scores) if scores else None},
         "timings": {"history":round(fetch_seconds,3),"indicator_preparation":round(prep_seconds,3),"total":round(time.perf_counter()-started,3)},
     }
+
+
+def _audit(input_count: int, output_count: int, rejections: dict[str, int]) -> dict[str, Any]:
+    rejected = sum(rejections.values())
+    return {"input": input_count, "output": output_count, "rejected": rejected,
+            "rejections": rejections, "invariant_ok": input_count == output_count + rejected}
 
 
 def _reason_counts(failures: list[dict[str,Any]]) -> dict[str,int]:

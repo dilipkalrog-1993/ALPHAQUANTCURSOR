@@ -16,7 +16,11 @@ from news_intelligence import NewsManager
 
 
 def history(rows=240, trend=True):
-    close = np.linspace(100, 150, rows) if trend else np.full(rows, 100.0)
+    # A monotonic ramp produces RSI=100 and does not genuinely satisfy the
+    # production momentum gate. Alternating pullbacks keep the uptrend intact
+    # while producing a realistic, qualifying RSI without weakening the gate.
+    close = (np.linspace(100, 150, rows) + np.where(np.arange(rows) % 2, 1.0, -1.0)
+             if trend else np.full(rows, 100.0))
     return pd.DataFrame({"Open":close-.2,"High":close+1,"Low":close-1,"Close":close,
                          "Volume":np.full(rows, 500_000)}, index=pd.date_range("2025-01-01", periods=rows))
 
@@ -109,6 +113,6 @@ def test_static_live_execution_lock():
 
 
 def test_no_synthetic_sample_candidate_injection():
-    production=[Path("core/headless_pipeline.py"),Path("tools/run_real_nse_validation.py")]
+    production=[Path("core/history.py"),Path("core/production_engine.py"),Path("tools/run_real_nse_validation.py")]
     text="\n".join(p.read_text().lower() for p in production)
     assert "synthetic candidate" not in text and "sample candidate" not in text

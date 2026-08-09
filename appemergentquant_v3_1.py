@@ -88,6 +88,7 @@ from market.snapshots import (
 from market.feed_worker import UpstoxFeedWorker
 from market.upstox_v3_feed import UpstoxV3FeedManager
 from market.analytics import refresh_market_analytics, record_entry_evaluation_latency
+from core.production_engine import run_streamlit_discovery
 from streamlit.components.v1 import html as component_html
 from io import StringIO
 from requests.adapters import HTTPAdapter
@@ -349,12 +350,12 @@ if st.session_state.get("_page") not in _PRODUCT_PAGES:
 _nav_cols = st.columns([1, 1, 1, 1, .42])
 for _column, _pname in zip(_nav_cols[:4], _PRODUCT_PAGES):
     with _column:
-        if st.button(_pname.upper(), key=f"_nav_btn_{_pname}", use_container_width=True,
+        if st.button(_pname.upper(), key=f"_nav_btn_{_pname}", width="stretch",
                      type="primary" if st.session_state["_page"] == _pname else "secondary"):
             st.session_state["_page"] = _pname
             st.rerun()
 with _nav_cols[4]:
-    if st.button("USER", key="_profile_control", use_container_width=True, help="Open user profile"):
+    if st.button("USER", key="_profile_control", width="stretch", help="Open user profile"):
         st.session_state["_profile_open"] = True
         st.rerun()
 
@@ -440,7 +441,7 @@ class WorkspaceManager:
         "historical_provider": "Yahoo Finance",
         "fast_track_execution": True,
         "minimum_fast_ai_score": 70,
-        "scoring_engine_version": "V1",
+        "scoring_engine_version": "V2",
         "require_deep_ai_before_entry": False,
         "signal_expiry_minutes": 30,
         "discovery_focus_limit_fast": 28,
@@ -962,7 +963,7 @@ def show_startup_health_check():
         run_startup_health_check()
     unhealthy = [c for c in st.session_state.startup_health if c["Status"] != "OK"]
     with st.expander("Startup Health Check", expanded=bool(unhealthy)):
-        st.dataframe(pd.DataFrame(st.session_state.startup_health), use_container_width=True)
+        st.dataframe(pd.DataFrame(st.session_state.startup_health), width="stretch")
         if unhealthy:
             st.error("AlphaQuant can start, but one or more services need attention before the full pipeline can complete.")
         else:
@@ -3422,7 +3423,7 @@ if _P("AI"):
 
                 df,
 
-                use_container_width=True
+                width="stretch"
 
             )
     # =====================================================
@@ -3479,7 +3480,7 @@ if _P("AI"):
 
             st.dataframe(
                 signals_df,
-                use_container_width=True
+                width="stretch"
             )
 
 
@@ -3540,7 +3541,7 @@ if _P("AI"):
 
             st.dataframe(
                 b2_df,
-                use_container_width=True
+                width="stretch"
             )
 
 # =====================================================
@@ -4848,7 +4849,7 @@ def show_open_positions():
 
             pd.DataFrame(rows),
 
-            use_container_width=True
+            width="stretch"
 
         )
 
@@ -4887,7 +4888,7 @@ def show_trade_history():
 
             pd.DataFrame(rows),
 
-            use_container_width=True
+            width="stretch"
 
         )
 
@@ -5028,7 +5029,7 @@ def show_registered_strategies():
 
             pd.DataFrame(rows),
 
-            use_container_width=True
+            width="stretch"
 
         )
 
@@ -5546,9 +5547,8 @@ if "final_trade_list" not in st.session_state:
 
 def get_scoring_engine_version() -> str:
     """V2 for both PAPER and LIVE CASH GUARDED. V1 preserved for explicit rollback only."""
-    explicit = WORKSPACE.preferences.get("scoring_engine_version")
-    if explicit in ("V1", "V2"):
-        return explicit
+    # V2 is the only normal production path. A stale saved V1 preference must
+    # not silently split the Streamlit and headless pipelines again.
     return "V2"
 
 
@@ -5892,7 +5892,7 @@ def show_ai_consensus():
 
             df,
 
-            use_container_width=True
+            width="stretch"
 
         )
 
@@ -6049,7 +6049,7 @@ def show_allocated_portfolio():
 
             df,
 
-            use_container_width=True
+            width="stretch"
 
         )
 # =====================================================
@@ -6213,21 +6213,18 @@ def execute_scan_pipeline():
         return f"{len(st.session_state.market_data)} symbols initialized"
 
     def scan_stage():
-        from discovery.pipeline import DiscoveryPipeline
-
         screen_started = time.perf_counter()
         total = len(st.session_state.market_data)
         progress = st.progress(0) if total else None
         status = st.empty()
         status.write("Running eligibility filter and opportunity ranking…")
 
-        pipeline = DiscoveryPipeline(sys.modules[__name__])
-        discovery = pipeline.run(
-            st.session_state.market_data,
+        discovery = run_streamlit_discovery(
+            sys.modules[__name__],
             reject_fn=reject,
             stage_counts=stage_counts,
         )
-        stage_counts["Data available"] = discovery.eligible_count
+        stage_counts["Data available"] = discovery.history_ready_count
         st.session_state["discovery_last_audit"] = discovery.eligibility_audit.to_dict()
         st.session_state["discovery_last_focus"] = discovery.focus_meta
         st.session_state["discovery_last_timings"] = discovery.timings.as_dict()
@@ -7853,7 +7850,7 @@ def show_portfolio_dashboard():
 
         st.dataframe(
             rows,
-            use_container_width=True
+            width="stretch"
         )
 
     st.divider()
@@ -7887,7 +7884,7 @@ def show_portfolio_dashboard():
 
             closed,
 
-            use_container_width=True
+            width="stretch"
 
         )
 # =====================================================
@@ -10143,7 +10140,7 @@ def show_ai_summary():
 
         pd.DataFrame(rows),
 
-        use_container_width=True,
+        width="stretch",
 
         hide_index=True
 
@@ -10182,7 +10179,7 @@ def show_portfolio_summary():
 
         pd.DataFrame(rows),
 
-        use_container_width=True,
+        width="stretch",
 
         hide_index=True
 
@@ -10215,7 +10212,7 @@ def show_live_positions():
 
             pd.DataFrame(rows),
 
-            use_container_width=True,
+            width="stretch",
 
             hide_index=True
 
@@ -10384,7 +10381,7 @@ def show_mission_control():
                     {"Brain/Stage": k, "Status": v}
                     for k, v in st.session_state.brain_status.items()
                 ]),
-                use_container_width=True,
+                width="stretch",
             )
         monitor = PipelineMonitor().update()
         m1, m2, m3, m4 = st.columns(4)
@@ -10408,15 +10405,15 @@ def show_mission_control():
                     "Message": phase.message,
                 })
                 st.progress(int(phase.progress_percent), text=f"{phase.phase_name}: {phase.status}")
-            st.dataframe(pd.DataFrame(phase_rows), use_container_width=True)
+            st.dataframe(pd.DataFrame(phase_rows), width="stretch")
         if st.session_state.get("pipeline_events"):
-            st.dataframe(pd.DataFrame(st.session_state.pipeline_events), use_container_width=True)
+            st.dataframe(pd.DataFrame(st.session_state.pipeline_events), width="stretch")
         else:
             st.info("Press RUN ALPHAQUANT to start the complete workflow.")
 
     with tab_funnel:
         if st.session_state.get("decision_funnel"):
-            st.dataframe(pd.DataFrame(st.session_state.decision_funnel), use_container_width=True)
+            st.dataframe(pd.DataFrame(st.session_state.decision_funnel), width="stretch")
         else:
             st.info("Decision funnel will populate after RUN ALPHAQUANT.")
         if not st.session_state.get("selected_portfolio") and st.session_state.get("no_trade_explanation"):
@@ -10427,7 +10424,7 @@ def show_mission_control():
     with tab_trades:
         final_df = get_final_trade_dataframe()
         if len(final_df):
-            st.dataframe(final_df, use_container_width=True)
+            st.dataframe(final_df, width="stretch")
         elif st.session_state.get("no_trade_explanation"):
             st.warning("No trade today.")
             for reason in st.session_state.no_trade_explanation:
@@ -10449,7 +10446,7 @@ def show_mission_control():
     with tab_portfolio:
         pdf = portfolio_dataframe()
         if len(pdf):
-            st.dataframe(pdf, use_container_width=True)
+            st.dataframe(pdf, width="stretch")
         else:
             st.caption("No allocated portfolio positions from the latest run.")
 
@@ -10472,7 +10469,7 @@ def show_mission_control():
             {"Area": "Last Strategy Run", "Value": health.get("last_strategy_run")},
             {"Area": "Last Broker Sync", "Value": health.get("last_broker_sync")},
             {"Area": "Last Live Tick", "Value": health.get("last_live_tick")},
-        ]), use_container_width=True)
+        ]), width="stretch")
 
     with tab_errors:
         errors = CentralErrorManager().get_errors()
@@ -10483,7 +10480,7 @@ def show_mission_control():
                 "Severity": e.severity,
                 "Message": e.message,
                 "Status": "Resolved" if e.resolved else "Open",
-            } for e in errors]), use_container_width=True)
+            } for e in errors]), width="stretch")
         else:
             st.success("No pipeline errors recorded.")
 
@@ -10615,9 +10612,9 @@ def opportunity_filters():
           "volume_threshold":a.number_input("Volume threshold",0,int(1e9),int(saved.get("volume_threshold",0)),step=1000,key="dashboard_opportunity_filters_volume_threshold"),
         }
         x,y,z=st.columns(3)
-        apply=x.button("Apply Filters",type="primary",use_container_width=True,key="dashboard_opportunity_filters_apply")
-        reset=y.button("Reset Filters",use_container_width=True,key="dashboard_opportunity_filters_reset")
-        save=z.button("Save Filter Preset",use_container_width=True,key="dashboard_opportunity_filters_save")
+        apply=x.button("Apply Filters",type="primary",width="stretch",key="dashboard_opportunity_filters_apply")
+        reset=y.button("Reset Filters",width="stretch",key="dashboard_opportunity_filters_reset")
+        save=z.button("Save Filter Preset",width="stretch",key="dashboard_opportunity_filters_save")
         if reset: values={}; WORKSPACE.save(filters={}); st.rerun()
         if apply or save: WORKSPACE.save(filters=values)
     return WORKSPACE.preferences.get("filters",saved)
@@ -10724,7 +10721,7 @@ def render_opportunities():
                 message="No trade is ready for execution." if i==0 else {1:"No opportunities are being watched.",2:"No rejected opportunities.",3:"No opportunities are available."}[i]
                 st.markdown(f'<div class="aq-empty">{message}</div>',unsafe_allow_html=True)
                 if i==0: st.caption(f"{potential} candidates reviewed · {passed_analysis} passed analysis · {passed_risk} passed risk checks · 0 met final entry conditions")
-            else: st.dataframe(frame,use_container_width=True,hide_index=True,height=min(360,38+35*len(frame)))
+            else: st.dataframe(frame,width="stretch",hide_index=True,height=min(360,38+35*len(frame)))
     st.info("A candidate is not a position. A position exists only after an order is submitted and filled.")
 
 def _watchlist_quotes(symbols):
@@ -10742,7 +10739,7 @@ def render_watchlist(full=False):
     lists=WORKSPACE.preferences.get("watchlists",{"Default":st.session_state.get("watchlist",[])}) or {"Default":[]}; default=WORKSPACE.preferences.get("default_watchlist","Default")
     if default not in lists: default=next(iter(lists))
     a,b,c=st.columns([2,2,1]); active=a.selectbox("Watchlist",list(lists),index=list(lists).index(default),label_visibility="collapsed",key="watchlist_active_list"); symbol=b.text_input("Symbol",placeholder="ADD SYMBOL",label_visibility="collapsed",key="watchlist_add_symbol").strip().upper().replace(".NS","");
-    if c.button("Add",use_container_width=True,key="watchlist_add_button_route") and symbol:
+    if c.button("Add",width="stretch",key="watchlist_add_button_route") and symbol:
         lists[active]=sorted(set(lists[active]+[symbol])); st.session_state.watchlist=lists[active]; WORKSPACE.save(watchlists=lists,default_watchlist=active); st.rerun()
     if full:
         d,e,f=st.columns(3); rename=d.text_input("Rename watchlist",value=active,key="watchlist_rename_name"); new=e.text_input("New watchlist",key="watchlist_new_name"); make_default=f.button("Set default",key="watchlist_set_default")
@@ -10753,7 +10750,7 @@ def render_watchlist(full=False):
     search=st.text_input("Search",key=f"watch_search_{full}",label_visibility="collapsed",placeholder="SEARCH WATCHLIST")
     symbols=sorted([x for x in lists[active] if search.upper() in x.upper()]); st.session_state.watchlist=lists[active]
     df=_watchlist_quotes(symbols)
-    if not df.empty: st.dataframe(df,use_container_width=True,hide_index=True,height=min(260,38+35*len(df)))
+    if not df.empty: st.dataframe(df,width="stretch",hide_index=True,height=min(260,38+35*len(df)))
     if full and symbols:
         remove=st.selectbox("Remove symbol",symbols,key="watchlist_remove_symbol")
         if st.button("Remove",key="watchlist_remove_button_route"): lists[active].remove(remove); WORKSPACE.save(watchlists=lists); st.rerun()
@@ -10764,7 +10761,7 @@ def render_watchlist(full=False):
         data=st.session_state.get("market_data",{}).get(selected+".NS")
         with st.expander(f"{selected} · AlphaQuant view",expanded=True):
             if isinstance(data,pd.DataFrame) and not data.empty:
-                st.line_chart(data[["Close"]].tail(90)); st.dataframe(data.tail(10),use_container_width=True)
+                st.line_chart(data[["Close"]].tail(90)); st.dataframe(data.tail(10),width="stretch")
             st.write("**Strategy signal:**",next((getattr(t,"strategy","WATCH") for t in st.session_state.get("final_trade_list",[]) if selected in getattr(t,"symbol","")),"WATCH"))
             st.caption("Signal reason and relevant news appear when supplied by the strategy and news engines.")
 
@@ -10992,7 +10989,7 @@ def render_symbol_details(symbol: str | None = None):
         if annotations:
             price_layers.append({"data":{"values":annotations},"mark":{"type":"rule","strokeDash":[5,3]},"encoding":{"y":{"field":"Price","type":"quantitative"},"color":{"field":"Label","type":"nominal","legend":{"orient":"top"}}}})
     candle_spec={"params":[{"name":"zoom","select":"interval","bind":"scales"}],"vconcat":[{"height":380,"layer":price_layers},{"height":100,"mark":"bar","encoding":{"x":{"field":"Timestamp","type":"temporal"},"y":{"field":"Volume","type":"quantitative"},"color":{"condition":{"test":"datum.Open <= datum.Close","value":"#24c78e"},"value":"#ef5b64"}}}],"resolve":{"scale":{"x":"shared"}}}
-    st.vega_lite_chart(chart, candle_spec, use_container_width=True)
+    st.vega_lite_chart(chart, candle_spec, width="stretch")
     st.caption(f"Source: {source} · Last update: {data.index[-1]} · Bid/ask and company metadata appear when supplied by the active broker. Chart supports browser zoom/pan through Vega interaction.")
 
 
@@ -11025,9 +11022,9 @@ def render_terminal_dashboard():
     blocked=not configured or (mode=="LIVE" and not broker_ready)
     if mode=="LIVE" and not broker_ready: st.error("Live execution is disabled until broker authentication and quote API tests both succeed.")
     if running:
-        if st.button("STOP ALPHAQUANT",type="primary",use_container_width=True,key="product_stop"):
+        if st.button("STOP ALPHAQUANT",type="primary",width="stretch",key="product_stop"):
             get_core_runtime().stop(); st.session_state.update(autonomous_active=False,stop_requested=True,pipeline_state="STOPPED"); st.rerun()
-    elif st.button("RUN ALPHAQUANT",type="primary",use_container_width=True,disabled=blocked,key="product_run"):
+    elif st.button("RUN ALPHAQUANT",type="primary",width="stretch",disabled=blocked,key="product_run"):
         run_id,started=get_core_runtime().start({"mode":mode,"universe":prefs.get("universe_source"),"interval":prefs.get("candle_interval"),"period":prefs.get("history_period")})
         st.session_state.update(alphaquant_run_pending=started,pipeline_state="STARTING",core_run_id=run_id); st.rerun()
     final=st.session_state.get("final_trade_list",[]); normal=_normal_opportunity_frame(filtered_opportunities({}))
@@ -12625,9 +12622,9 @@ def render_broker_connection():
         st.info("Credentials saved securely: API key •••••••• · API secret •••••••• · Access token ••••••••")
         st.caption(f"Expected token expiry: {profile.get('token_expiry_date','Not provided')} · Last successful validation: {profile.get('last_successful_validation','Never')} · Last failed validation: {profile.get('last_failed_validation','Never')}")
         a,b=st.columns(2)
-        if a.button("EDIT CONNECTION",use_container_width=True,key="broker_edit"):
+        if a.button("EDIT CONNECTION",width="stretch",key="broker_edit"):
             st.session_state["broker_editing"]=True; st.rerun()
-        if b.button("DISCONNECT",use_container_width=True,key="broker_disconnect"):
+        if b.button("DISCONNECT",width="stretch",key="broker_disconnect"):
             get_broker_quote_worker().stop(); get_broker_state().update(authenticated=False,connected=False,market_data_connected=False,execution_connected=False,data_source="YFINANCE_INTRADAY_FALLBACK",health_status="DISCONNECTED",connection_error=None)
             st.session_state.pop("broker_connection_result",None); st.rerun()
     else:
@@ -12639,7 +12636,7 @@ def render_broker_connection():
             access_token=st.text_input("Access Token",type="password",value="",key="broker_access_token")
             expiry=st.date_input("Token Expiry Date",value=None,key="broker_expiry",help="Expected expiry supplied by you; it is not described as broker-verified.")
             confirm=st.checkbox("Confirm replacement of the saved connection",value=not saved,key="broker_confirm")
-            submitted=st.form_submit_button("SAVE AND CONNECT",type="primary",use_container_width=True)
+            submitted=st.form_submit_button("SAVE AND CONNECT",type="primary",width="stretch")
         if submitted:
             if saved and not confirm: st.error("Confirm credential replacement to continue.")
             else:
@@ -12713,7 +12710,7 @@ if hasattr(st,"dialog"):
     @st.dialog("USER PROFILE",width="large")
     def render_profile_dialog():
         render_profile_contents()
-        if st.button("CLOSE",use_container_width=True,key="profile_close"):
+        if st.button("CLOSE",width="stretch",key="profile_close"):
             st.session_state["_profile_open"]=False; st.rerun()
 else:
     def render_profile_dialog(): render_profile_contents()
@@ -12743,7 +12740,7 @@ def render_speech_controls(text, key, autoplay=False):
 def render_news_page():
     manager=get_news_manager(); state=manager.snapshot(); settings=WORKSPACE.preferences.get("news_settings",{})
     top,refresh=st.columns([4,1]); top.markdown("### Market Brief")
-    if refresh.button("REFRESH NEWS",disabled=not settings.get("enabled",False),use_container_width=True): manager.request_refresh(); st.info("Refresh queued; trading workers continue independently.")
+    if refresh.button("REFRESH NEWS",disabled=not settings.get("enabled",False),width="stretch"): manager.request_refresh(); st.info("Refresh queued; trading workers continue independently.")
     if not settings.get("enabled",False): st.info("Market news is disabled. Enable it under USER → NOTIFICATIONS.")
     elif state.get("provider_status")=="DEGRADED": st.warning(f"News is temporarily unavailable. Last successful update: {state.get('last_successful_fetch') or 'never'}.")
     brief=manager.briefing("INTRADAY"); st.write(brief)
@@ -12786,8 +12783,8 @@ def render_market_page():
     if reminder: st.warning(reminder)
     if WORKSPACE.preferences.get("execution_mode","PAPER")=="PAPER" and state_label in {"NOT CONNECTED","DELAYED FALLBACK"}: st.info("PAPER TRADING READY WITH DELAYED DATA")
     run,stop=st.columns(2)
-    if run.button("RUN ALPHAQUANT",type="primary",disabled=running,use_container_width=True,key="market_run"): st.session_state["alphaquant_run_pending"]=True; st.rerun()
-    if stop.button("STOP ALPHAQUANT",disabled=not running,use_container_width=True,key="market_stop"): st.session_state.update(autonomous_active=False,stop_requested=True,pipeline_state="STOPPED"); get_core_runtime().stop(); st.rerun()
+    if run.button("RUN ALPHAQUANT",type="primary",disabled=running,width="stretch",key="market_run"): st.session_state["alphaquant_run_pending"]=True; st.rerun()
+    if stop.button("STOP ALPHAQUANT",disabled=not running,width="stretch",key="market_stop"): st.session_state.update(autonomous_active=False,stop_requested=True,pipeline_state="STOPPED"); get_core_runtime().stop(); st.rerun()
     overview,watch,news,search,chart,opportunities=st.tabs(["OVERVIEW","WATCHLISTS","NEWS","SYMBOL SEARCH","CHARTS","OPPORTUNITIES"])
     with overview:
         active=list(st.session_state.get("scan_universe",[])) or None
@@ -12796,7 +12793,7 @@ def render_market_page():
         st.caption(f"Unchanged {breadth['unchanged']} · Unavailable {breadth['unavailable']} · A/D {breadth['advance_decline_ratio']:.2f} · {breadth['classification']}")
         if regime["missing_inputs"]: st.info("Regime unavailable — missing " + ", ".join(regime["missing_inputs"]) + ".")
         sectors=sector_snapshot(active); st.markdown("#### Sector overview")
-        st.dataframe(sectors,use_container_width=True,hide_index=True) if not sectors.empty else _empty_state(f"Sector overview unavailable — only {breadth['valid']} of {breadth['total']} symbols have valid previous-close data.")
+        st.dataframe(sectors,width="stretch",hide_index=True) if not sectors.empty else _empty_state(f"Sector overview unavailable — only {breadth['valid']} of {breadth['total']} symbols have valid previous-close data.")
     with watch: render_watchlist(True)
     with news: render_news_page()
     with search:
@@ -13062,18 +13059,13 @@ def create_atomic_paper_trade(trade):
 
 def render_trading_page():
     st.header("TRADING")
-    if WORKSPACE.preferences.get("execution_mode","PAPER") == "PAPER":
-        preset=st.radio("Paper preset",["PAPER NORMAL","PAPER DISCOVERY"],horizontal=True,
-            index=1 if WORKSPACE.preferences.get("paper_preset","PAPER NORMAL")=="PAPER DISCOVERY" else 0,key="paper_preset")
-        if preset != WORKSPACE.preferences.get("paper_preset","PAPER NORMAL"): WORKSPACE.save(paper_preset=preset)
-        if preset == "PAPER DISCOVERY":
-            st.info("Discovery mode uses relaxed paper-only selection rules for testing and data collection. It never changes Live defaults.")
-            st.caption("Long only · maximum 2 positions · reduced size · stop loss, reward/risk, stale-data and expiry protections retained.")
+    mode_label = "LIVE CASH GUARDED" if WORKSPACE.preferences.get("live_mode_enabled") else "LIVE DATA + PAPER"
+    st.caption(f"Execution workspace: {mode_label}")
     tabs=st.tabs(["POSITIONS","HOLDINGS","TRADE SETUPS","REJECTED","ORDERS","CLOSED TRADES"])
     pos=position_frame(); hold=holdings_frame(); orders=_orders_frame(); closed=_closed_trades_frame(); source=_normal_opportunity_frame(filtered_opportunities(WORKSPACE.preferences.get("filters",{})))
     frames=[pos,hold,None,None,orders,closed]; messages=["No open positions.","No holdings.","","","No orders.","No closed trades."]
     for index in [0,1,4,5]:
-        with tabs[index]: st.dataframe(frames[index],use_container_width=True,hide_index=True) if not frames[index].empty else _empty_state(messages[index])
+        with tabs[index]: st.dataframe(frames[index],width="stretch",hide_index=True) if not frames[index].empty else _empty_state(messages[index])
     with tabs[2]:
         setup_tabs=st.tabs(["ACTIONABLE","WAITING FOR ENTRY","WATCHING","EXPIRED"])
         statuses=["READY","WAITING FOR ENTRY","WATCHING","EXPIRED"]
@@ -13081,27 +13073,42 @@ def render_trading_page():
             with tab:
                 frame=source[source["Status"]==status].copy(); frame["Last Updated"]=get_broker_state().snapshot().get("last_quote_time")
                 cols=["Symbol","Side","Strategy","Current Price","Entry","Stop","Target","Confidence","Status","Reason","Last Updated"]
-                st.dataframe(frame.reindex(columns=cols),use_container_width=True,hide_index=True) if not frame.empty else _empty_state(f"No {status.lower()} trade setups.")
+                st.dataframe(frame.reindex(columns=cols),width="stretch",hide_index=True) if not frame.empty else _empty_state(f"No {status.lower()} trade setups.")
     with tabs[3]:
         rejected=source[source["Status"]=="REJECTED"].copy()
-        if not rejected.empty: rejected["Reason"]=rejected["Reason"].map(_business_reason); st.dataframe(rejected,use_container_width=True,hide_index=True)
+        if not rejected.empty: rejected["Reason"]=rejected["Reason"].map(_business_reason); st.dataframe(rejected,width="stretch",hide_index=True)
         else: _empty_state("No rejected candidates.")
     counts=st.session_state.get("pipeline_stage_counts",{})
     if counts and not len(st.session_state.get("final_trade_list",[])):
         reviewed=counts.get("Universe selected",0); available=counts.get("Data available",0); screened=counts.get("Passed fast screen",0); signalled=counts.get("Strategy signalled",0)
         state="MARKET CLOSED" if not is_market_open() else ("DATA UNAVAILABLE" if not available else "NO CANDIDATES")
         st.info(f"**{state}** — No valid setups were found.\n\n{reviewed} symbols reviewed · {available} had sufficient history · {screened} passed initial screening · {signalled} met strategy conditions")
+    production_diagnostics = st.session_state.get("production_diagnostics", {}).get("stages", {})
+    if production_diagnostics:
+        labels = {"history_ready":"History Ready", "eligible":"Eligible", "focus":"Focus",
+            "strategy_signals":"Strategy Signals", "v2_qualified":"V2 Qualified",
+            "risk_approved":"Risk Approved", "waiting_entry":"Waiting Entry", "ready":"Ready",
+            "persisted":"Persisted", "displayed":"Displayed", "executed":"Executed"}
+        st.subheader("Pipeline Readiness")
+        st.dataframe(pd.DataFrame([{"Stage": labels.get(stage, stage), "Count": count}
+            for stage, count in production_diagnostics.items()]), hide_index=True, width="stretch")
     if WORKSPACE.preferences.get("developer_mode",False):
         with st.expander("Developer · candidate funnel and paper validation",expanded=False):
-            if counts: st.dataframe(pd.DataFrame([{"Stage":k,"Count":v} for k,v in counts.items()]),hide_index=True,use_container_width=True)
+            preset=st.radio("Paper test preset",["Normal","Discovery"],horizontal=True,
+                index=1 if WORKSPACE.preferences.get("paper_preset","PAPER NORMAL")=="PAPER DISCOVERY" else 0,
+                key="developer_paper_preset")
+            stored_preset = "PAPER DISCOVERY" if preset == "Discovery" else "PAPER NORMAL"
+            if stored_preset != WORKSPACE.preferences.get("paper_preset","PAPER NORMAL"):
+                WORKSPACE.save(paper_preset=stored_preset)
+            if counts: st.dataframe(pd.DataFrame([{"Stage":k,"Count":v} for k,v in counts.items()]),hide_index=True,width="stretch")
             rejected=st.session_state.get("candidate_rejections",{})
-            if rejected: st.dataframe(pd.DataFrame(rejected.values()),hide_index=True,use_container_width=True)
+            if rejected: st.dataframe(pd.DataFrame(rejected.values()),hide_index=True,width="stretch")
             timings=st.session_state.get("pipeline_timings",{})
-            if timings: st.dataframe(pd.DataFrame([{"Stage":k,"Seconds":v} for k,v in timings.items()]),hide_index=True,use_container_width=True)
+            if timings: st.dataframe(pd.DataFrame([{"Stage":k,"Seconds":v} for k,v in timings.items()]),hide_index=True,width="stretch")
             result=st.session_state.get("paper_validation_result")
             if result:
                 (st.success if result["passed"] else st.error)("Paper lifecycle PASS" if result["passed"] else "Paper lifecycle FAIL")
-                st.dataframe(pd.DataFrame(result["stages"]),hide_index=True,use_container_width=True)
+                st.dataframe(pd.DataFrame(result["stages"]),hide_index=True,width="stretch")
         if get_scoring_engine_version() == "V2":
             with st.expander("Developer · V2 trade confidence breakdown", expanded=False):
                 v2_rows = []
@@ -13123,7 +13130,7 @@ def render_trading_page():
                     }
                     v2_rows.append(row)
                 if v2_rows:
-                    st.dataframe(pd.DataFrame(v2_rows), hide_index=True, use_container_width=True)
+                    st.dataframe(pd.DataFrame(v2_rows), hide_index=True, width="stretch")
                     selected = st.selectbox("Inspect V2 detail", [r["Symbol"] for r in v2_rows], key="dev_v2_detail_symbol")
                     detail = next(t for t in st.session_state.get("final_trade_list", []) if getattr(t, "symbol", "") == selected)
                     payload = getattr(detail, "trade_score_v2", None)
@@ -13141,13 +13148,13 @@ def render_reports_page():
         with tab:
             frame=trades.copy()
             if not frame.empty and "Date" in frame: frame["Date"]=pd.to_datetime(frame["Date"],errors="coerce"); frame=frame.set_index("Date").resample(period).agg({"P&L":"sum","Symbol":"count"}).rename(columns={"Symbol":"Trades"}).reset_index()
-            st.dataframe(frame,use_container_width=True,hide_index=True) if not frame.empty else _empty_state("No completed trades for this period.")
-    with tabs[3]: st.dataframe(trades,use_container_width=True,hide_index=True) if not trades.empty else _empty_state("No realized P&L yet.")
-    with tabs[4]: st.dataframe(setups.groupby("Strategy").size().rename("Setups").reset_index(),use_container_width=True,hide_index=True) if not setups.empty and "Strategy" in setups else _empty_state("No strategy performance data.")
+            st.dataframe(frame,width="stretch",hide_index=True) if not frame.empty else _empty_state("No completed trades for this period.")
+    with tabs[3]: st.dataframe(trades,width="stretch",hide_index=True) if not trades.empty else _empty_state("No realized P&L yet.")
+    with tabs[4]: st.dataframe(setups.groupby("Strategy").size().rename("Setups").reset_index(),width="stretch",hide_index=True) if not setups.empty and "Strategy" in setups else _empty_state("No strategy performance data.")
     with tabs[5]: _empty_state("AI performance appears after reviewed trade outcomes.")
-    with tabs[6]: st.dataframe(positions,use_container_width=True,hide_index=True) if not positions.empty else _empty_state("No active portfolio risk.")
-    with tabs[7]: st.dataframe(holdings_frame(),use_container_width=True,hide_index=True) if not holdings_frame().empty else _empty_state("No capital is currently allocated.")
-    with tabs[8]: st.dataframe(trades,use_container_width=True,hide_index=True) if not trades.empty else _empty_state("The trade journal is empty.")
+    with tabs[6]: st.dataframe(positions,width="stretch",hide_index=True) if not positions.empty else _empty_state("No active portfolio risk.")
+    with tabs[7]: st.dataframe(holdings_frame(),width="stretch",hide_index=True) if not holdings_frame().empty else _empty_state("No capital is currently allocated.")
+    with tabs[8]: st.dataframe(trades,width="stretch",hide_index=True) if not trades.empty else _empty_state("The trade journal is empty.")
     with tabs[9]:
         for name,frame in {"Trade Journal":trades,"Trade Setups":setups,"Positions":positions}.items(): st.download_button(f"DOWNLOAD {name.upper()} CSV",frame.to_csv(index=False).encode("utf-8-sig"),f"{name.lower().replace(' ','_')}.csv","text/csv",key=f"download_{name}")
 
@@ -13190,9 +13197,8 @@ def render_live_status_panel():
     c3.metric("Scoring", get_scoring_engine_version())
     live_enabled = bool(prefs.get("live_mode_enabled"))
     c4.metric("Mode", "LIVE — REAL MONEY" if live_enabled else ("LIVE DATA + PAPER" if market_mode == "UPSTOX_LIVE" else mode))
-    funds = broker.get("available_cash") or broker.get("cash")
-    if funds is not None:
-        st.caption(f"Broker available cash: {funds}")
+    funds = broker.get("available_cash", broker.get("cash", "N/A"))
+    st.caption(f"Broker available cash: {funds if funds is not None else 'N/A'}")
     intent = OrderIntent(trade_id="PREVIEW", decision_id="preview", client_order_id="preview-readiness",
         symbol="RELIANCE.NS", side="BUY", quantity=1, price=100.0, trade_confidence=0, score_version="V2")
     trade = type("T", (), {"symbol": "RELIANCE.NS", "strategy": "PREVIEW", "risk_verdict": {"verdict": "APPROVED"},
@@ -13203,9 +13209,10 @@ def render_live_status_panel():
     st.caption(f"Live Readiness: {'PASS' if ok else 'FAIL — ' + ', '.join(blockers[:5])}")
     if live_enabled:
         st.error("LIVE — REAL MONEY. External orders require LIVE CASH GUARDED enablement and readiness PASS.")
-    with st.expander("Live order preview (NOT SENT)", expanded=False):
-        preview = LiveExecutionAdapter.build_order_preview(intent, trade, _mod)
-        st.json(preview)
+    if prefs.get("developer_mode", False):
+        with st.expander("Developer · guarded order preview (NOT SENT)", expanded=False):
+            preview = LiveExecutionAdapter.build_order_preview(intent, trade, _mod)
+            st.dataframe(pd.DataFrame([preview]), hide_index=True, width="stretch")
 
 
 def main():

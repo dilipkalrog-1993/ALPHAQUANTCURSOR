@@ -1,0 +1,6 @@
+[
+  {"delay_s": 0.01, "type": "message", "payload": {"type": "live_feed", "feeds": {"NSE_INDEX|Nifty 50": {"ltpc": {"ltp": 24500.5, "cp": 24400.0, "ltt": 1735689600000}}}}},
+  {"delay_s": 0.01, "type": "message", "payload": {"type": "live_feed", "feeds": {"NSE_INDEX|Nifty Bank": {"ltpc": {"ltp": 51200.0, "cp": 51000.0, "ltt": 1735689600000}}}}},
+  {"delay_s": 0.01, "type": "message", "payload": {"type": "live_feed", "feeds": {"NSE_INDEX|Nifty Fin Service": {"ltpc": {"ltp": 23800.0, "cp": 23750.0, "ltt": 1735689600000}}}}},
+  {"delay_s": 0.01, "type": "message", "payload": {"type": "live_feed", "feeds": {"NSE_INDEX|India VIX": {"ltpc": {"ltp": 14.2, "cp": 13.8, "ltt": 1735689600000}}}}}
+]

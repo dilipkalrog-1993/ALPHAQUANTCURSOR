@@ -45,10 +45,11 @@ def _run(label: str, symbols: list[str], focus_limit: int = 50) -> dict[str, Any
     total_at = time.perf_counter()
     histories, cache_seconds, hits = _load(symbols)
     result = run_production_pipeline(histories, focus_limit=focus_limit)
+    stages = result["diagnostics"].counts
     counts = {
-        "master": len(symbols), "eligible": len(result["eligible"]),
-        "active": len(result["active"]), "focus": len(result["focus"]),
-        "strategy_evaluated": len(result["focus"]), "candidates": len(result["candidates"]),
+        "master": stages["master"], "eligible": stages["eligible"],
+        "active": stages["active"], "focus": stages["focus"],
+        "strategy_signals": stages["strategy_signals"], "candidates": stages["candidates"],
         "hot": 0, "positions": 0,
     }
     timings = {"history_cache": round(cache_seconds, 6), **result["timings"]}
@@ -56,6 +57,7 @@ def _run(label: str, symbols: list[str], focus_limit: int = 50) -> dict[str, Any
     return {"label": label, "counts": counts, "cache_hits": hits,
         "cache_misses": len(symbols) - hits,
         "cache_hit_rate": round(hits / len(symbols), 4) if symbols else 0.0,
+        "indicator_cache_hit_rate": None,
         "provider_fetches": 0, "provider_failures": [], "timings": timings}
 
 

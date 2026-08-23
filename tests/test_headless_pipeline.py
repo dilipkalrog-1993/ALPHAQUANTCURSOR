@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from core.headless_pipeline import (Candidate, StageAudit, compute_candidate,
     normalize_history, persist_candidates, prepare_indicators, reconcile_candidates)
@@ -14,6 +15,8 @@ from execution.live_adapter import LiveExecutionAdapter
 from execution.paper_adapter import PaperExecutionAdapter
 from news_intelligence import NewsManager
 from core.history import load_incremental_history
+from core.diagnostics import PipelineDiagnostics
+from core.production_engine import run_production_pipeline
 
 
 def history(rows=240, trend=True):
@@ -110,6 +113,27 @@ def test_genuine_computed_candidate_creation():
 def test_candidate_transition_diagnostics():
     audit=StageAudit(28,20,{"NO_STRATEGY_SIGNAL":8}).to_dict()
     assert audit=={"input":28,"output":20,"rejected":8,"rejections":{"NO_STRATEGY_SIGNAL":8},"invariant_ok":True}
+
+
+def test_production_pipeline_reports_active_and_obeys_discovery_funnel():
+    histories = [(f"REAL{i}.NS", history(), "test") for i in range(4)]
+    result = run_production_pipeline(histories, focus_limit=2)
+    stages = result["diagnostics"].to_dict()["stages"]
+    assert stages["master"] >= stages["eligible"] >= stages["active"] >= stages["focus"]
+    assert stages["active"] == len(result["active"])
+    assert stages["strategy_signals"] == stages["candidates"] == len(result["candidates"])
+
+
+def test_diagnostics_rejects_invalid_discovery_funnel_but_not_signal_cardinality():
+    diagnostics = PipelineDiagnostics()
+    diagnostics.record("master", 10)
+    diagnostics.record("eligible", 8)
+    diagnostics.record("active", 6)
+    diagnostics.record("focus", 4)
+    diagnostics.record("strategy_signals", 7)  # signals are not a universe stage
+    diagnostics.record("candidates", 9)         # candidate semantics are independent
+    with pytest.raises(ValueError, match="Invalid pipeline funnel"):
+        diagnostics.record("active", 11)
 
 
 def test_trade_setups_backend_ui_reconciliation():

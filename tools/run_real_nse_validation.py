@@ -80,9 +80,10 @@ def run_universe(symbols: list[str], label: str, universe_seconds: float) -> dic
         "provider_fetch": round(sum(r.provider_seconds for r in results), 3),
         "history_normalization": round(sum(r.normalize_seconds for r in results), 3),
         **production["timings"], "total": round(time.perf_counter()-started, 3)}
-    return {"label":label, "counts":{"master":len(symbols), "eligible":len(production["eligible"]),
-        "active":len(production["active"]), "focus":len(production["focus"]),
-        "strategy_evaluated":len(production["focus"]), "candidates":len(candidates), "hot":0, "positions":0},
+    stages = production["diagnostics"].counts
+    return {"label":label, "counts":{"master":stages["master"], "eligible":stages["eligible"],
+        "active":stages["active"], "focus":stages["focus"],
+        "strategy_signals":stages["strategy_signals"], "candidates":stages["candidates"], "hot":0, "positions":0},
         "cache":{"hits":cache_hits,"misses":len(results)-cache_hits,
             "hit_rate":round(cache_hits/len(results),4) if results else 0.0},
         "provider_failures":provider_failures, "per_symbol_provider_timing":[r.timing_dict() for r in results],

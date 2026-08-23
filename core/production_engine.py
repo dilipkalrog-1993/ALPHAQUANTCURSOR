@@ -28,6 +28,7 @@ def run_production_pipeline(
     prepared: dict[str, Any] = {}
     failures = []
     diagnostics = PipelineDiagnostics()
+    diagnostics.record("master", len(histories))
     indicator_at = time.perf_counter()
     for symbol, raw, provider in histories:
         frame, failure = prepare_indicators(symbol, raw, provider)
@@ -64,7 +65,8 @@ def run_production_pipeline(
     v2_at = time.perf_counter()
     candidates: list[Candidate] = [score_candidate(row["symbol"], row["dataframe"]) for row in signalled]
     v2_seconds = time.perf_counter() - v2_at
-    diagnostics.record("strategy_signals", len(candidates), {"NO_STRATEGY_SIGNAL": len(focus) - len(candidates)})
+    diagnostics.record("strategy_signals", len(signalled), {"NO_STRATEGY_SIGNAL": len(focus) - len(signalled)})
+    diagnostics.record("candidates", len(candidates))
     diagnostics.record("v2_qualified", len(candidates))
     persistence_at = time.perf_counter()
     persisted = persist_candidates(candidates, persistence_path) if persistence_path is not None else len(candidates)

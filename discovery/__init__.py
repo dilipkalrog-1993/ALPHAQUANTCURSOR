@@ -1,5 +1,7 @@
-"""Discovery pipeline — eligibility, opportunity ranking, focus universe."""
+"""Headless discovery package.
 
-from discovery.pipeline import DiscoveryPipeline, run_discovery_scan
+Submodules are deliberately not imported here: importing a small backend stage
+must not eagerly load the application-oriented discovery pipeline.
+"""
 
-__all__ = ["DiscoveryPipeline", "run_discovery_scan"]
+__all__: list[str] = []

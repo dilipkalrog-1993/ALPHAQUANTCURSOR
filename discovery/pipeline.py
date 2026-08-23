@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from discovery.eligibility import EligibilityAudit, filter_eligible
-from discovery.focus_universe import build_focus_universe, focus_limit_for_mode, mandatory_symbols
+from discovery.focus_universe import build_focus_universe, focus_limit_for_mode
+from discovery.streamlit_focus_adapter import mandatory_symbols
 from discovery.opportunity_ranker import rank_eligible
 from discovery.structure_cache import get_cached_structure, store_structure_cache
 from discovery.symbol_context import SymbolAnalysisContext

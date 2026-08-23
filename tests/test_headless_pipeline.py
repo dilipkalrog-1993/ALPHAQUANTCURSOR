@@ -36,6 +36,21 @@ def test_benchmark_imports_no_streamlit_modules():
     subprocess.run([sys.executable,"-c",code],check=True)
 
 
+def test_benchmark_static_import_graph_has_no_ui_dependencies():
+    from tools.audit_discovery_benchmark_imports import audit
+    modules, violations = audit()
+    names = {name for name, _ in modules}
+    assert "core.production_engine" in names
+    assert "discovery.pipeline" not in names
+    assert not violations
+
+
+def test_production_engine_has_no_streamlit_adapter_symbols():
+    production = Path("core/production_engine.py").read_text(encoding="utf-8")
+    assert "session_state" not in production
+    assert "run_streamlit_discovery" not in production
+
+
 def test_history_cache_is_incremental_and_atomic(tmp_path):
     old = history(220)
     (tmp_path / "ABC.pkl").write_bytes(__import__("pickle").dumps(old))

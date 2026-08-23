@@ -63,6 +63,11 @@ def load_incremental_history(
     ``downloader`` has the yfinance-compatible ``download`` signature and is
     injectable so this behaviour can be tested without making network calls.
     """
+    # Resolve exchange renames before both provider access and cache lookup.
+    # The returned symbol is canonical so stale aliases cannot leak downstream.
+    from market.instrument_master import InstrumentMaster
+    mapping = InstrumentMaster().canonical_mapping(symbol)
+    symbol = mapping["historical_provider_symbol"]
     started = time.perf_counter()
     path = _cache_path(symbol, cache_dir)
     cached = pd.DataFrame()

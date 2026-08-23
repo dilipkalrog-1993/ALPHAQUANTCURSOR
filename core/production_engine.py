@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Iterable
 import time
+import math
 
 from core.diagnostics import PipelineDiagnostics
 from core.headless_pipeline import Candidate, StageAudit, has_strategy_signal, score_candidate, persist_candidates
@@ -72,12 +73,44 @@ def run_production_pipeline(
         row["symbol"], row["dataframe"], data_source=providers.get(row["symbol"], "unknown"),
         scoring_profile=scoring_profile,
     ) for row in signalled]
-    candidates = [candidate for candidate in scored
-                  if candidate.trade_score_v2.gate_decision == "APPROVED"]
+    candidates: list[Candidate] = []
+    signal_outcomes: list[dict[str, Any]] = []
+    rejection_counts: dict[str, int] = {}
+    for candidate in scored:
+        v2 = candidate.trade_score_v2
+        missing = sorted({item for component in v2.all_components() for item in component.missing_inputs})
+        reason = None
+        if not all(math.isfinite(value) and value > 0 for value in (candidate.entry, candidate.stop, candidate.target)):
+            reason = "INVALID_ENTRY" if not math.isfinite(candidate.entry) or candidate.entry <= 0 else (
+                "INVALID_STOP" if not math.isfinite(candidate.stop) or candidate.stop <= 0 else "INVALID_TARGET")
+        elif not candidate.stop < candidate.entry < candidate.target:
+            reason = "INVALID_STOP" if candidate.stop >= candidate.entry else "INVALID_TARGET"
+        elif v2.gate_decision != "APPROVED":
+            reason = "MISSING_COMPONENT_DATA" if v2.trade_confidence is None else "V2_BELOW_THRESHOLD"
+        if reason is None:
+            candidates.append(candidate)
+        else:
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+        signal_outcomes.append({
+            "symbol": candidate.symbol, "strategy": candidate.strategy,
+            "strategy_signal_status": "SIGNALLED",
+            "score_version": v2.score_version,
+            "profile_name": v2.scoring_profile,
+            "profile_version": v2.scoring_version,
+            "component_weights_snapshot": dict(v2.scoring_weights_snapshot),
+            "trade_confidence": v2.trade_confidence,
+            "v2_component_breakdown": {c.component: c.weighted_contribution for c in v2.all_components()},
+            "v2_threshold": v2.gate_threshold,
+            "v2_qualified": v2.gate_decision == "APPROVED",
+            "missing_component_data": missing,
+            "risk_status": "NOT_REACHED" if reason else "NOT_EVALUATED_BY_DISCOVERY",
+            "candidate_creation_result": "CREATED" if reason is None else "REJECTED",
+            "exact_rejection_reason": reason,
+        })
     v2_seconds = time.perf_counter() - v2_at
     diagnostics.record("strategy_signals", len(signalled), {"NO_STRATEGY_SIGNAL": len(focus) - len(signalled)})
-    diagnostics.record("v2_qualified", len(candidates), {"BELOW_V2_THRESHOLD": len(scored) - len(candidates)})
-    diagnostics.record("candidates", len(candidates))
+    diagnostics.record("v2_qualified", len(candidates), rejection_counts)
+    diagnostics.record("candidates", len(candidates), rejection_counts)
     persistence_at = time.perf_counter()
     persisted = persist_candidates(candidates, persistence_path) if persistence_path is not None else len(candidates)
     persistence_seconds = time.perf_counter() - persistence_at
@@ -88,6 +121,7 @@ def run_production_pipeline(
         "persistence": persistence_seconds, "total": time.perf_counter() - total_at}
     return {"candidates": candidates, "failures": failures, "prepared": prepared,
             "eligible": eligible, "active": active, "focus": focus, "focus_meta": focus_meta,
+            "signal_outcomes": signal_outcomes,
             "timings": {key: round(value, 6) for key, value in timings.items()},
             "eligibility_audit": eligibility_audit, "diagnostics": diagnostics}
 

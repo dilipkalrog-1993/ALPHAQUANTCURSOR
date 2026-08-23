@@ -54,7 +54,9 @@ def _run(label: str, symbols: list[str], focus_limit: int = 50) -> dict[str, Any
     }
     timings = {"history_cache": round(cache_seconds, 6), **result["timings"]}
     timings["total"] = round(time.perf_counter() - total_at, 6)
-    return {"label": label, "counts": counts, "cache_hits": hits,
+    return {"label": label, "requested_universe": len(symbols),
+        "available_cached": hits, "evaluated": stages["master"], "missing_cache": len(symbols) - hits,
+        "counts": counts, "signal_outcomes": result["signal_outcomes"], "cache_hits": hits,
         "cache_misses": len(symbols) - hits,
         "cache_hit_rate": round(hits / len(symbols), 4) if symbols else 0.0,
         "indicator_cache_hit_rate": None,
@@ -66,8 +68,8 @@ def main() -> int:
     seed = [f"{s}.NS" for s in SEED50]
     universes = [
         _run("nifty_50", seed, 50),
-        _run("nse_200_cached", (cached or seed)[:200], 50),
-        _run("largest_cached_nse", cached, 75),
+        _run("nse_200_requested", seed + [s for s in cached if s not in seed][:150], 50),
+        _run("largest_available_cache", cached, 75),
     ]
     report = {"engine": "core.production_engine", "headless": True, "universes": universes,
         "targets": {"focus_50_seconds": 5, "nse_200_seconds": 15, "full_cheap_rank_seconds": 30}}

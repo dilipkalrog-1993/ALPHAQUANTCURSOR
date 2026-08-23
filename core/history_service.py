@@ -3,12 +3,15 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import errno
 import json
+import os
 from pathlib import Path
 import pickle
 import threading
 import time
 from typing import Any
+import uuid
 
 import pandas as pd
 
@@ -151,8 +154,58 @@ class HistoryService:
                              failure_category=category, failure_detail=detail)
 
 
-def atomic_json(path: Path, value: Any) -> None:
+def _remove_stale_json_temps(path: Path, *, older_than: float = 3600.0) -> None:
+    """Best-effort removal of abandoned writers' uniquely named temp files."""
+    cutoff = time.time() - older_than
+    for candidate in path.parent.glob(f".{path.name}.*.tmp"):
+        try:
+            if candidate.stat().st_mtime < cutoff:
+                candidate.unlink()
+        except OSError:
+            # A live writer or OneDrive may have the file open.  Never make
+            # cleanup a reason to lose a valid checkpoint.
+            pass
+
+
+def atomic_json(path: Path, value: Any, *, retries: int = 6,
+                initial_backoff: float = 0.05) -> bool:
+    """Durably replace JSON, tolerating bounded Windows/OneDrive locks.
+
+    A false result means the old checkpoint is intact and the caller may defer
+    checkpointing.  Symbol cache persistence is independent of this file.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, indent=2, default=str), encoding="utf-8")
-    temp.replace(path)
+    _remove_stale_json_temps(path)
+    temp = path.parent / f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    try:
+        with temp.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, indent=2, default=str)
+            handle.flush()
+            os.fsync(handle.fileno())
+        for attempt in range(retries + 1):
+            try:
+                os.replace(temp, path)
+                # fsyncing directories is useful on POSIX and unsupported on
+                # Windows; the replaced file itself was already flushed.
+                if os.name != "nt":
+                    directory_fd = os.open(path.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                return True
+            except OSError as exc:
+                retryable = (isinstance(exc, PermissionError) or
+                             getattr(exc, "winerror", None) in {5, 32, 33} or
+                             exc.errno in {errno.EACCES, errno.EBUSY})
+                if not retryable:
+                    raise
+                if attempt == retries:
+                    return False
+                time.sleep(min(initial_backoff * (2 ** attempt), 1.0))
+        return False
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass

@@ -1,5 +1,8 @@
 import json
+import logging
+import os
 import pickle
+import sys
 
 import pandas as pd
 
@@ -7,6 +10,7 @@ from core.history_providers import HistoryStatus, ProviderResult, YahooHistoryPr
 from core.history_service import HistoryService, atomic_json, cache_readiness, read_cache
 from core.readiness import build_pre_market_report
 from market.instrument_master import InstrumentMaster
+from tools.bootstrap_nse_history import CoordinatorLock, history_inventory
 
 
 def candles(rows=220, start="2025-01-01"):
@@ -95,6 +99,102 @@ def test_checkpoint_atomic_persistence_supports_resume(tmp_path):
     saved = json.loads(path.read_text())
     assert saved["completed"]["ABC.NS"]["status"] == "HISTORY_READY"
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_checkpoint_retries_permission_error_then_succeeds(tmp_path, monkeypatch):
+    path = tmp_path / "checkpoint.json"
+    real_replace, calls = os.replace, []
+    def flaky(source, destination):
+        calls.append((source, destination))
+        if len(calls) == 1:
+            raise PermissionError(5, "Access is denied")
+        return real_replace(source, destination)
+    monkeypatch.setattr("core.history_service.os.replace", flaky)
+    monkeypatch.setattr("core.history_service.time.sleep", lambda _: None)
+    assert atomic_json(path, {"ok": True}, retries=2)
+    assert json.loads(path.read_text()) == {"ok": True}
+    assert len(calls) == 2
+
+
+def test_repeated_checkpoint_permission_error_is_deferred_and_preserves_old(tmp_path, monkeypatch):
+    path = tmp_path / "checkpoint.json"
+    path.write_text('{"completed":{"OLD":{}}}')
+    monkeypatch.setattr("core.history_service.os.replace",
+                        lambda *_: (_ for _ in ()).throw(PermissionError(5, "Access is denied")))
+    monkeypatch.setattr("core.history_service.time.sleep", lambda _: None)
+    assert atomic_json(path, {"completed": {"NEW": {}}}, retries=2) is False
+    assert "OLD" in json.loads(path.read_text())["completed"]
+
+
+def test_checkpoint_uses_unique_temp_names(tmp_path, monkeypatch):
+    sources = []
+    real_replace = os.replace
+    def observe(source, destination):
+        sources.append(str(source))
+        return real_replace(source, destination)
+    monkeypatch.setattr("core.history_service.os.replace", observe)
+    path = tmp_path / "checkpoint.json"
+    assert atomic_json(path, {"version": 1})
+    assert atomic_json(path, {"version": 2})
+    assert sources[0] != sources[1]
+
+
+def test_stale_checkpoint_temp_cleanup(tmp_path):
+    path = tmp_path / "checkpoint.json"
+    stale = tmp_path / f".{path.name}.1.abandoned.tmp"
+    stale.write_text("partial")
+    os.utime(stale, (1, 1))
+    assert atomic_json(path, {"valid": True})
+    assert not stale.exists()
+
+
+def test_only_one_checkpoint_coordinator(tmp_path):
+    checkpoint = tmp_path / "checkpoint.json"
+    with CoordinatorLock(checkpoint):
+        try:
+            with CoordinatorLock(checkpoint):
+                assert False, "second coordinator must be blocked"
+        except RuntimeError:
+            pass
+    assert not checkpoint.with_suffix(".json.lock").exists()
+
+
+def test_deferred_checkpoint_resume_uses_durable_symbol_cache(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"; cache.mkdir()
+    frame = candles(220, "2025-05-01")
+    (cache / "ABC.pkl").write_bytes(pickle.dumps(frame))
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text('{"completed":{}}')
+    monkeypatch.setattr("core.history_service.os.replace",
+                        lambda *_: (_ for _ in ()).throw(PermissionError(5, "Access is denied")))
+    monkeypatch.setattr("core.history_service.time.sleep", lambda _: None)
+    assert not atomic_json(checkpoint, {"completed": {"ABC.NS": {"status": "HISTORY_READY"}}}, retries=0)
+    assert cache_readiness(read_cache("ABC.NS", cache),
+                           pd.Timestamp("2025-12-07", tz="UTC").to_pydatetime()) == "HISTORY_READY"
+
+
+def test_yahoo_raw_delisted_message_is_suppressed_and_remains_no_data(capsys):
+    def noisy(*_args, **_kwargs):
+        print("$ABC.NS: possibly delisted", file=sys.stderr)
+        logging.getLogger("yfinance").error("possibly delisted")
+        return pd.DataFrame()
+    result = YahooHistoryProvider(downloader=noisy, requests_per_second=10000).fetch(
+        symbol="ABC.NS", instrument_key=None, start="2025-01-01", end="2025-02-01", timeout=1)
+    captured = capsys.readouterr()
+    assert "delisted" not in captured.err.lower()
+    assert result.status == HistoryStatus.NO_DATA
+
+
+def test_progress_inventory_counts_actual_selected_work(monkeypatch):
+    statuses = {"FRESH": "HISTORY_READY", "STALE": "HISTORY_STALE",
+                "SHORT": "INSUFFICIENT_ROWS", "NONE": "NO_HISTORY"}
+    monkeypatch.setattr("tools.bootstrap_nse_history.read_cache", lambda symbol: symbol)
+    monkeypatch.setattr("tools.bootstrap_nse_history.cache_readiness", lambda value: statuses[value])
+    readiness, counts = history_inventory(list(statuses))
+    assert len(readiness) == 4
+    assert counts == {"history_ready_fresh": 1, "history_stale": 1,
+                      "history_insufficient": 1, "history_missing": 1}
+    assert counts["history_stale"] + counts["history_insufficient"] + counts["history_missing"] == 3
 
 
 def test_benchmark_remains_cache_only():

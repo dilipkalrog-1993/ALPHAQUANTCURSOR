@@ -8,6 +8,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from contextlib import redirect_stderr
+import io
+import logging
 import threading
 import time
 from typing import Any, Protocol
@@ -15,6 +18,8 @@ from urllib.parse import quote
 
 import pandas as pd
 import requests
+
+_YAHOO_OUTPUT_LOCK = threading.Lock()
 
 
 class HistoryStatus(str, Enum):
@@ -139,8 +144,20 @@ class YahooHistoryProvider:
                 downloader = yf.download
             else:
                 downloader = self.downloader
-            raw = downloader(symbol, start=start, end=end, interval="1d", progress=False,
-                             auto_adjust=True, threads=False, timeout=timeout)
+            # yfinance emits non-authoritative "possibly delisted" messages
+            # through both logging and stderr. Capture both; AlphaQuant owns
+            # the resulting structured classification.
+            with _YAHOO_OUTPUT_LOCK, redirect_stderr(io.StringIO()):
+                yahoo_loggers = [logging.getLogger(name) for name in ("yfinance", "yfinance.utils")]
+                previous = [logger.disabled for logger in yahoo_loggers]
+                try:
+                    for logger in yahoo_loggers:
+                        logger.disabled = True
+                    raw = downloader(symbol, start=start, end=end, interval="1d", progress=False,
+                                     auto_adjust=True, threads=False, timeout=timeout)
+                finally:
+                    for logger, disabled in zip(yahoo_loggers, previous):
+                        logger.disabled = disabled
             if raw is None or raw.empty:
                 # Yahoo's misleading "possibly delisted" text is not evidence.
                 return ProviderResult(symbol, self.name, HistoryStatus.NO_DATA, start=start, end=end,

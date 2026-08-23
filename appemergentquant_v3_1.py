@@ -89,7 +89,7 @@ from market.feed_worker import UpstoxFeedWorker
 from market.upstox_v3_feed import UpstoxV3FeedManager
 from market.analytics import refresh_market_analytics, record_entry_evaluation_latency
 from core.streamlit_production_adapter import run_streamlit_discovery
-from core.scoring_profiles import COMPONENTS, SAFE_BOUNDS, ScoringProfileStore, simulate
+from core.scoring_profiles import COMPONENTS, DEFAULT_WEIGHTS, SAFE_BOUNDS, ScoringProfileStore, simulate
 from streamlit.components.v1 import html as component_html
 from io import StringIO
 from requests.adapters import HTTPAdapter
@@ -12867,6 +12867,8 @@ def render_configuration_page():
             store.reset(); st.success("AlphaQuant Default v1 restored.")
     with live_tab:
         st.warning("LIVE TRADING USES REAL MONEY. All limits below are required before LIVE CASH GUARDED can be enabled.")
+        live_scoring_mode = "DEFAULT" if active.weights == DEFAULT_WEIGHTS else "CUSTOM"
+        st.info(f"LIVE scoring: {live_scoring_mode} · {active.name} v{active.version} · V2 (LIVE CASH GUARDED remains locked)")
         with st.form("live_cash_configuration"):
             a,b=st.columns(2)
             max_notional=a.number_input("Maximum order notional (INR)",1000.0,value=float(prefs.get("live_max_order_notional") or 0),step=1000.0)

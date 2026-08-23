@@ -20,12 +20,13 @@ from discovery.opportunity_ranker import rank_eligible
 
 def run_production_pipeline(
     histories: Iterable[tuple[str, Any, str]], *, focus_limit: int = 28,
-    persistence_path: Path | None = None,
+    persistence_path: Path | None = None, scoring_profile: Any | None = None,
 ) -> dict[str, Any]:
     """Run history → eligibility → focus → strategy/V2 candidate → persistence."""
     histories = list(histories)
     total_at = time.perf_counter()
     prepared: dict[str, Any] = {}
+    providers: dict[str, str] = {}
     failures = []
     diagnostics = PipelineDiagnostics()
     diagnostics.record("master", len(histories))
@@ -36,6 +37,7 @@ def run_production_pipeline(
             failures.append(failure.to_dict())
         else:
             prepared[symbol] = frame
+            providers[symbol] = provider
     failure_counts: dict[str, int] = {}
     for failure in failures:
         failure_counts[failure["reason"]] = failure_counts.get(failure["reason"], 0) + 1
@@ -63,11 +65,19 @@ def run_production_pipeline(
             signalled.append(row)
     strategy_seconds = time.perf_counter() - strategy_at
     v2_at = time.perf_counter()
-    candidates: list[Candidate] = [score_candidate(row["symbol"], row["dataframe"]) for row in signalled]
+    # score_candidate is a compatibility adapter, but it delegates directly to
+    # scoring_engine_v2.compute_trade_score_v2; no local confidence arithmetic
+    # is permitted in production.
+    scored: list[Candidate] = [score_candidate(
+        row["symbol"], row["dataframe"], data_source=providers.get(row["symbol"], "unknown"),
+        scoring_profile=scoring_profile,
+    ) for row in signalled]
+    candidates = [candidate for candidate in scored
+                  if candidate.trade_score_v2.gate_decision == "APPROVED"]
     v2_seconds = time.perf_counter() - v2_at
     diagnostics.record("strategy_signals", len(signalled), {"NO_STRATEGY_SIGNAL": len(focus) - len(signalled)})
+    diagnostics.record("v2_qualified", len(candidates), {"BELOW_V2_THRESHOLD": len(scored) - len(candidates)})
     diagnostics.record("candidates", len(candidates))
-    diagnostics.record("v2_qualified", len(candidates))
     persistence_at = time.perf_counter()
     persisted = persist_candidates(candidates, persistence_path) if persistence_path is not None else len(candidates)
     persistence_seconds = time.perf_counter() - persistence_at

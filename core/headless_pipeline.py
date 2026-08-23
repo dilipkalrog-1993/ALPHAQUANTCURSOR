@@ -44,11 +44,30 @@ class PipelineFailure:
 class Candidate:
     symbol: str
     strategy: str
-    score: float
+    trade_confidence: float
     entry: float
     stop: float
     target: float
+    score_version: str = "V2"
+    component_scores: dict[str, float] = field(default_factory=dict)
+    risk_reward: float = 0.0
+    data_source: str = "unknown"
+    data_timestamp: str = ""
+    data_freshness: str = "unknown"
+    strategy_diagnostics: dict[str, Any] = field(default_factory=dict)
+    positive_reasons: list[str] = field(default_factory=list)
+    watch_items: list[str] = field(default_factory=list)
+    confluence_bonus: float = 0.0
+    scoring_profile: str = "AlphaQuant Default"
+    scoring_profile_version: int = 1
+    scoring_weights_snapshot: dict[str, float] = field(default_factory=dict)
+    trade_score_v2: Any = field(default=None, repr=False, compare=False)
     computed: bool = True
+
+    @property
+    def score(self) -> float:
+        """Compatibility display alias; confidence is owned exclusively by V2."""
+        return self.trade_confidence
 
 
 @dataclass
@@ -72,13 +91,42 @@ def has_strategy_signal(df: pd.DataFrame) -> bool:
     return bool(row.Close > row.EMA20 > row.EMA50 and row.Close > row.EMA200 and 45 <= row.RSI <= 75)
 
 
-def score_candidate(symbol: str, df: pd.DataFrame) -> Candidate:
-    """Materialize the risk levels and score after a strategy has signalled."""
+def score_candidate(
+    symbol: str, df: pd.DataFrame, *, data_source: str = "unknown",
+    scoring_profile: Any | None = None,
+) -> Candidate:
+    """Deprecated compatibility adapter that delegates to canonical Scoring V2."""
+    from types import SimpleNamespace
+    import scoring_engine_v2
+
     row = df.iloc[-1]
     atr = float(row.ATR)
-    score = min(100.0, 50 + max(0.0, float(row.RSI)-45) + min(20, (float(row.Close/row.EMA50)-1)*200))
-    return Candidate(symbol, "TREND_MOMENTUM", round(score, 2), float(row.Close),
-                     round(float(row.Close)-1.5*atr, 2), round(float(row.Close)+3*atr, 2))
+    entry = float(row.Close)
+    candidate = Candidate(
+        symbol=symbol, strategy="BREAKOUT", trade_confidence=0.0, entry=entry,
+        stop=round(entry - 1.5 * atr, 2), target=round(entry + 3 * atr, 2),
+        risk_reward=2.0, data_source=data_source,
+        data_timestamp=str(getattr(df.index[-1], "isoformat", lambda: df.index[-1])()),
+        data_freshness="current",
+        strategy_diagnostics={"gate": "trend_momentum", "signal": True},
+    )
+    stock = SimpleNamespace(data=df, indicators={}, score={}, sector="UNKNOWN")
+    v2 = scoring_engine_v2.compute_trade_score_v2(
+        stock, candidate, all_strategies=[candidate.strategy], scoring_profile=scoring_profile,
+    )
+    if v2.score_version != "V2":
+        raise RuntimeError("Canonical scorer returned a non-V2 score")
+    candidate.trade_confidence = v2.trade_confidence
+    candidate.component_scores = {c.component: c.weighted_contribution for c in v2.all_components()}
+    candidate.confluence_bonus = v2.confluence_bonus
+    candidate.positive_reasons = list(v2.positive_reasons)
+    candidate.watch_items = list(v2.watch_items)
+    candidate.scoring_profile = v2.scoring_profile
+    candidate.scoring_profile_version = v2.scoring_version
+    candidate.scoring_weights_snapshot = dict(v2.scoring_weights_snapshot)
+    candidate.strategy_diagnostics.update({"v2_gate_decision": v2.gate_decision})
+    candidate.trade_score_v2 = v2
+    return candidate
 
 
 def compute_candidate(symbol: str, df: pd.DataFrame) -> Candidate | None:
@@ -87,7 +135,13 @@ def compute_candidate(symbol: str, df: pd.DataFrame) -> Candidate | None:
 
 
 def persist_candidates(candidates: Iterable[Candidate], path: Path) -> int:
-    rows = [asdict(c) for c in candidates]
+    rows = []
+    for candidate in candidates:
+        row = asdict(candidate)
+        # The immutable scalar/component snapshot is the persistence contract;
+        # the rich runtime score object is intentionally not JSON serialized.
+        row.pop("trade_score_v2", None)
+        rows.append(row)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(rows, indent=2), encoding="utf-8"); tmp.replace(path)
@@ -99,7 +153,7 @@ def reconcile_candidates(backend: Iterable[Any], persisted: Iterable[Any], filte
     filters = filters or {}
     unfiltered = persisted
     displayed = [c for c in unfiltered if (not filters.get("search") or filters["search"].upper() in str(getattr(c, "symbol", c.get("symbol", "") if isinstance(c, dict) else "")).upper())
-                 and float(getattr(c, "score", c.get("score", 0) if isinstance(c, dict) else 0)) >= float(filters.get("minimum_confidence", 0))]
+                 and float(getattr(c, "trade_confidence", c.get("trade_confidence", c.get("score", 0)) if isinstance(c, dict) else 0)) >= float(filters.get("minimum_confidence", 0))]
     hidden = len(unfiltered) - len(displayed)
     return {"backend_candidates": len(backend), "persisted_candidates": len(persisted),
             "unfiltered_candidates": len(unfiltered), "displayed_candidates": len(displayed),

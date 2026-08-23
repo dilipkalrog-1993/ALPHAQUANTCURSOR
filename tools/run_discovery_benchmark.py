@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""Discovery pipeline benchmark — old eligibility-only vs new focus pipeline."""
+"""Completely headless benchmark of the authoritative production pipeline.
 
+This deliberately benchmarks cached data: provider performance belongs to the
+real-NSE validator, while a repeatable benchmark must never initialize the UI.
+"""
 from __future__ import annotations
 
 import json
@@ -9,175 +12,70 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-CACHE_DIR = ROOT / "data" / "history_cache"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from core.history import DEFAULT_CACHE_DIR, normalize_history
+from core.production_engine import run_production_pipeline
+
+SEED50 = "ADANIENT ADANIPORTS APOLLOHOSP ASIANPAINT AXISBANK BAJAJ-AUTO BAJAJFINSV BAJFINANCE BEL BHARTIARTL BPCL BRITANNIA CIPLA COALINDIA DIVISLAB DRREDDY EICHERMOT GRASIM HCLTECH HDFCBANK HDFCLIFE HEROMOTOCO HINDALCO HINDUNILVR ICICIBANK INDUSINDBK INFY ITC JSWSTEEL KOTAKBANK LT LTIM M&M MARUTI NESTLEIND NTPC ONGC POWERGRID RELIANCE SBILIFE SBIN SHRIRAMFIN SUNPHARMA TATACONSUM TATAMOTORS TATASTEEL TCS TECHM TITAN TRENT".split()
 
 
-def _bootstrap(aq) -> None:
-    ss = aq.st.session_state
-    registry = list(ss.get("strategy_registry", []))
-    ss.clear()
-    ss["strategy_registry"] = registry
-    ss["paper_capital"] = 500_000.0
-    ss["paper_broker"] = {"connected": False, "cash": 500_000.0, "starting_capital": 500_000.0,
-        "positions": {}, "orders": {}, "trade_history": [], "realized_pnl": 0.0, "risk": {}}
-    ss["paper_positions"] = {}
-    ss["trade_candidates"] = {}
-    ss["final_trade_list"] = []
-    ss["market_data"] = {}
-    ss["stock_objects"] = {}
-    ss["waiting_entry"] = {}
-    ss["indicator_frame_cache"] = {}
-    aq.WORKSPACE.preferences.update({
-        "scoring_engine_version": "V2", "execution_mode": "PAPER",
-        "operating_mode": "Fast Scan", "minimum_fast_ai_score": 70,
-        "discovery_focus_limit_fast": 28,
-    })
+def _cached_symbols() -> list[str]:
+    return sorted(f"{p.stem}.NS" for p in DEFAULT_CACHE_DIR.glob("*.pkl"))
 
 
-def _load_universe(aq, symbols: list[str]) -> tuple[dict[str, Any], float]:
-    t0 = time.perf_counter()
-    data = {}
-    for sym in symbols:
-        p = CACHE_DIR / f"{sym.replace('.NS', '')}.pkl"
-        if not p.exists():
+def _load(symbols: list[str]) -> tuple[list[tuple[str, Any, str]], float, int]:
+    at = time.perf_counter()
+    rows: list[tuple[str, Any, str]] = []
+    for symbol in symbols:
+        path = DEFAULT_CACHE_DIR / f"{symbol.removesuffix('.NS')}.pkl"
+        try:
+            frame = normalize_history(pickle.loads(path.read_bytes()))
+            if not frame.empty:
+                rows.append((symbol, frame, "persistent-cache"))
+        except (OSError, EOFError, pickle.PickleError, ValueError, AttributeError):
             continue
-        raw = pickle.loads(p.read_bytes())
-        if hasattr(raw.columns, "nlevels") and raw.columns.nlevels > 1:
-            raw.columns = raw.columns.get_level_values(0)
-        df = aq.calculate_indicators(raw)
-        if df is not None:
-            data[sym] = df
-    return data, time.perf_counter() - t0
+    return rows, time.perf_counter() - at, len(rows)
 
 
-def _old_path(aq, market_data: dict[str, Any]) -> dict[str, Any]:
-    min_price = aq.CONFIG.get("MIN_PRICE", 20)
-    min_vol = aq.CONFIG.get("MIN_AVG_VOLUME", 100000)
-    t0 = time.perf_counter()
-    survivors = 0
-    signals = 0
-    for sym, df in market_data.items():
-        if len(df) < 50:
-            continue
-        if float(df.iloc[-1]["Close"]) < min_price:
-            continue
-        if float(df["Volume"].tail(20).mean()) < min_vol:
-            continue
-        survivors += 1
-        stock = aq.get_stock(sym)
-        stock.set_dataframe(df)
-        aq.calculate_trade_quality(stock)
-        aq.update_market_structure(stock)
-        aq.assign_sector(stock)
-        before = set(aq.st.session_state.trade_candidates)
-        aq.run_all_strategies(stock)
-        after = set(aq.st.session_state.trade_candidates)
-        if after - before:
-            aq.run_batch1_signal_engines(stock)
-            aq.run_batch2_signal_engines(stock)
-            signals += 1
-    with patch.object(aq, "is_market_open", return_value=True):
-        final = aq.build_ai_consensus()
-    return {
-        "survivors": survivors,
-        "strategy_evaluated": survivors,
-        "signals": signals,
-        "candidates": len(final or []),
-        "total": round(time.perf_counter() - t0, 3),
+def _run(label: str, symbols: list[str], focus_limit: int = 50) -> dict[str, Any]:
+    total_at = time.perf_counter()
+    histories, cache_seconds, hits = _load(symbols)
+    result = run_production_pipeline(histories, focus_limit=focus_limit)
+    counts = {
+        "master": len(symbols), "eligible": len(result["eligible"]),
+        "active": len(result["active"]), "focus": len(result["focus"]),
+        "strategy_evaluated": len(result["focus"]), "candidates": len(result["candidates"]),
+        "hot": 0, "positions": 0,
     }
-
-
-def _new_path(aq, market_data: dict[str, Any]) -> dict[str, Any]:
-    from discovery.pipeline import DiscoveryPipeline
-
-    t0 = time.perf_counter()
-    aq.st.session_state.market_data = market_data
-    try:
-        aq.fetch_nifty_benchmark()
-    except Exception:
-        pass
-    disc = DiscoveryPipeline(aq).run(market_data)
-    t1 = time.perf_counter()
-    with patch.object(aq, "is_market_open", return_value=True):
-        final = aq.build_ai_consensus()
-    timings = disc.timings.as_dict()
-    timings["scoring_v2"] = round(time.perf_counter() - t1, 3)
-    timings["total"] = round(time.perf_counter() - t0, 3)
-    return {
-        "eligible": disc.eligible_count,
-        "focus": disc.focus_count,
-        "strategy_evaluated": disc.strategy_evaluated,
-        "signals": disc.strategy_signals,
-        "candidates": len(final or []),
-        "eligibility_audit": disc.eligibility_audit.to_dict(),
-        "timings": timings,
-        "total": timings["total"],
-    }
-
-
-def _nifty50(aq) -> list[str]:
-    try:
-        syms = aq.fetch_index_constituents(aq.NSE_INDEX_SOURCES["Nifty50"])
-        return sorted({f"{s}.NS" if not str(s).endswith('.NS') else s for s in syms})[:50]
-    except Exception:
-        return [f"{s}.NS" for s in aq._NIFTY50_SEED]
-
-
-def _nifty200(aq) -> list[str]:
-    try:
-        syms = aq.fetch_index_constituents(aq.NSE_INDEX_SOURCES["Nifty200"])
-        return sorted({f"{s}.NS" if not str(s).endswith('.NS') else s for s in syms})[:200]
-    except Exception:
-        return []
+    timings = {"history_cache": round(cache_seconds, 6), **result["timings"]}
+    timings["total"] = round(time.perf_counter() - total_at, 6)
+    return {"label": label, "counts": counts, "cache_hits": hits,
+        "cache_misses": len(symbols) - hits,
+        "cache_hit_rate": round(hits / len(symbols), 4) if symbols else 0.0,
+        "provider_fetches": 0, "provider_failures": [], "timings": timings}
 
 
 def main() -> int:
-    import appemergentquant_v3_1 as aq
-
-    report: dict[str, Any] = {"universes": {}}
-    for label, symbols in [("nifty_50", _nifty50(aq)), ("nifty_200", _nifty200(aq))]:
-        if not symbols:
-            continue
-        _bootstrap(aq)
-        data, cache_t = _load_universe(aq, symbols)
-        _bootstrap(aq)
-        old = _old_path(aq, data)
-        _bootstrap(aq)
-        new = _new_path(aq, data)
-        report["universes"][label] = {
-            "input": len(symbols),
-            "cache_load_seconds": round(cache_t, 3),
-            "old": old,
-            "new": new,
-        }
-
-    # HOT entry path latency from entry monitor
-    from market.entry_monitor import HotEntryMonitor
-    from market.market_state import get_market_state
-    latencies = []
-    for _ in range(20):
-        t0 = time.perf_counter()
-        HotEntryMonitor(get_market_state()).evaluate(
-            type("T", (), {"symbol": "RELIANCE.NS", "entry": 100, "entry_status": "READY"})()
-        )
-        latencies.append((time.perf_counter() - t0) * 1000)
-    latencies.sort()
-    report["hot_entry_path_ms"] = {
-        "p50": round(latencies[len(latencies) // 2], 3),
-        "p95": round(latencies[int(len(latencies) * 0.95) - 1], 3),
-    }
-
-    n50 = report["universes"].get("nifty_50", {}).get("new", {}).get("total", 999)
-    n200 = report["universes"].get("nifty_200", {}).get("new", {}).get("total", 999)
-    report["performance_target"] = n50 <= 5.0 and n200 <= 15.0
-
+    cached = _cached_symbols()
+    seed = [f"{s}.NS" for s in SEED50]
+    universes = [
+        _run("nifty_50", seed, 50),
+        _run("nse_200_cached", (cached or seed)[:200], 50),
+        _run("largest_cached_nse", cached, 75),
+    ]
+    report = {"engine": "core.production_engine", "headless": True, "universes": universes,
+        "targets": {"focus_50_seconds": 5, "nse_200_seconds": 15, "full_cheap_rank_seconds": 30}}
     print(json.dumps(report, indent=2, default=str))
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("Benchmark interrupted cleanly", file=sys.stderr)
+        raise SystemExit(130)

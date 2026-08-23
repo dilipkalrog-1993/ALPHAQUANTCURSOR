@@ -11,16 +11,16 @@ _CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "structure_cache"
 _LOCK = threading.Lock()
 
 
-def _signature(df: Any) -> tuple:
+def _signature(df: Any, timeframe: str = "1d") -> tuple:
     try:
-        return (len(df), str(df.index[-1]), float(df.iloc[-1]["Close"]))
+        return (timeframe, str(df.index[-1]))
     except Exception:
         return (0, "", 0.0)
 
 
-def get_cached_structure(symbol: str, df: Any) -> dict[str, Any] | None:
-    sig = _signature(df)
-    path = _CACHE_DIR / f"{symbol.replace('.NS', '')}.pkl"
+def get_cached_structure(symbol: str, df: Any, timeframe: str = "1d") -> dict[str, Any] | None:
+    sig = _signature(df, timeframe)
+    path = _CACHE_DIR / f"{symbol.replace('.NS', '')}_{timeframe}.pkl"
     if not path.exists():
         return None
     try:
@@ -32,9 +32,11 @@ def get_cached_structure(symbol: str, df: Any) -> dict[str, Any] | None:
     return None
 
 
-def store_structure_cache(symbol: str, df: Any, structure: dict[str, Any]) -> None:
+def store_structure_cache(symbol: str, df: Any, structure: dict[str, Any], timeframe: str = "1d") -> None:
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    path = _CACHE_DIR / f"{symbol.replace('.NS', '')}.pkl"
-    payload = {"signature": _signature(df), "structure": structure}
+    path = _CACHE_DIR / f"{symbol.replace('.NS', '')}_{timeframe}.pkl"
+    payload = {"signature": _signature(df, timeframe), "structure": structure}
     with _LOCK:
-        path.write_bytes(pickle.dumps(payload))
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL))
+        tmp.replace(path)

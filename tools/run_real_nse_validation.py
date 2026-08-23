@@ -72,7 +72,7 @@ def run_universe(symbols: list[str], label: str, universe_seconds: float) -> dic
         pool.shutdown(wait=True)
     production = run_production_pipeline([(r.symbol, r.frame, r.provider) for r in results], focus_limit=50)
     candidates = production["candidates"]
-    scores = [c.score for c in candidates]
+    scores = [row["trade_confidence"] for row in production["signal_outcomes"]]
     provider_failures = [r.timing_dict() for r in results if r.failure]
     cache_hits = sum(r.cache_hit for r in results)
     timings = {"instrument_loading": round(universe_seconds, 3),
@@ -87,7 +87,8 @@ def run_universe(symbols: list[str], label: str, universe_seconds: float) -> dic
         "cache":{"hits":cache_hits,"misses":len(results)-cache_hits,
             "hit_rate":round(cache_hits/len(results),4) if results else 0.0},
         "provider_failures":provider_failures, "per_symbol_provider_timing":[r.timing_dict() for r in results],
-        "failures":production["failures"], "score_distribution":distribution(scores),
+        "failures":production["failures"], "signal_outcomes": production["signal_outcomes"],
+        "score_distribution":distribution(scores),
         "score_summary":{"mean":round(mean(scores),2) if scores else None,
             "median":round(median(scores),2) if scores else None}, "timings":timings}
 

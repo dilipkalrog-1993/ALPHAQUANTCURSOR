@@ -1,24 +1,31 @@
-"""Canonical market data layer."""
+"""Market backend package with lazy compatibility exports.
 
-from market.instrument_master import InstrumentMaster
-from market.market_state import MarketState, get_market_state
-from market.snapshots import (
-    get_broker_summary,
-    get_market_snapshot,
-    get_opportunity_snapshot,
-    get_portfolio_snapshot,
-    get_report_snapshot,
-)
-from market.subscription_tiers import SubscriptionTierManager
+Keeping ``__init__`` import-free prevents a backend submodule import from
+pulling in snapshot/session adapters or optional dataframe dependencies.
+"""
+from __future__ import annotations
 
-__all__ = [
-    "InstrumentMaster",
-    "MarketState",
-    "get_market_state",
-    "SubscriptionTierManager",
-    "get_market_snapshot",
-    "get_broker_summary",
-    "get_portfolio_snapshot",
-    "get_opportunity_snapshot",
-    "get_report_snapshot",
-]
+from importlib import import_module
+
+_EXPORTS = {
+    "InstrumentMaster": ("market.instrument_master", "InstrumentMaster"),
+    "MarketState": ("market.market_state", "MarketState"),
+    "get_market_state": ("market.market_state", "get_market_state"),
+    "SubscriptionTierManager": ("market.subscription_tiers", "SubscriptionTierManager"),
+    "get_market_snapshot": ("market.snapshots", "get_market_snapshot"),
+    "get_broker_summary": ("market.snapshots", "get_broker_summary"),
+    "get_portfolio_snapshot": ("market.snapshots", "get_portfolio_snapshot"),
+    "get_opportunity_snapshot": ("market.snapshots", "get_opportunity_snapshot"),
+    "get_report_snapshot": ("market.snapshots", "get_report_snapshot"),
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str):
+    if name not in _EXPORTS:
+        raise AttributeError(name)
+    module, attribute = _EXPORTS[name]
+    value = getattr(import_module(module), attribute)
+    globals()[name] = value
+    return value

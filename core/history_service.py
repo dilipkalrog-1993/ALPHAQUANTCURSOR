@@ -4,8 +4,10 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import pickle
+import random
 import threading
 import time
 from typing import Any
@@ -151,8 +153,44 @@ class HistoryService:
                              failure_category=category, failure_detail=detail)
 
 
-def atomic_json(path: Path, value: Any) -> None:
+def atomic_json(path: Path, value: Any, *, replace_retries: int = 8,
+                retry_delay: float = 0.05) -> bool:
+    """Durably replace *path*, tolerating short-lived Windows sync locks.
+
+    A false return means the old checkpoint remains authoritative.  History
+    cache writes are independent, so callers may safely continue and retry the
+    checkpoint after the next completed symbol.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, indent=2, default=str), encoding="utf-8")
-    temp.replace(path)
+    # Best-effort cleanup of abandoned unique temps, never a generic ``*.tmp``
+    # sweep.  A one-day grace period avoids touching another active process.
+    cutoff = time.time() - 86400
+    for stale in path.parent.glob(f"{path.name}.*.tmp"):
+        try:
+            if stale.stat().st_mtime < cutoff:
+                stale.unlink()
+        except OSError:
+            pass
+    # A unique name prevents concurrent processes and abandoned OneDrive
+    # handles from colliding.  Only the coordinator should call this function.
+    temp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{random.getrandbits(32):08x}.tmp")
+    try:
+        with temp.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, indent=2, default=str)
+            handle.flush()
+            os.fsync(handle.fileno())
+        for attempt in range(max(1, replace_retries)):
+            try:
+                os.replace(temp, path)
+                return True
+            except PermissionError:
+                if attempt + 1 < max(1, replace_retries):
+                    time.sleep(retry_delay * (attempt + 1))
+        return False
+    finally:
+        # On failure this is only an uncommitted copy; never touch the valid
+        # destination checkpoint.  Ignore another transient sync lock here.
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass

@@ -8,6 +8,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+import contextlib
+import io
+import logging
 import threading
 import time
 from typing import Any, Protocol
@@ -15,6 +18,8 @@ from urllib.parse import quote
 
 import pandas as pd
 import requests
+
+_YAHOO_DOWNLOAD_LOCK = threading.Lock()
 
 
 class HistoryStatus(str, Enum):
@@ -139,8 +144,18 @@ class YahooHistoryProvider:
                 downloader = yf.download
             else:
                 downloader = self.downloader
-            raw = downloader(symbol, start=start, end=end, interval="1d", progress=False,
-                             auto_adjust=True, threads=False, timeout=timeout)
+            # yfinance emits speculative "possibly delisted" diagnostics via
+            # both its logger and stderr.  Neither is authoritative.  Serialize
+            # this small section because redirect_stderr is process-global.
+            with _YAHOO_DOWNLOAD_LOCK, contextlib.redirect_stderr(io.StringIO()):
+                logger = logging.getLogger("yfinance")
+                old_disabled = logger.disabled
+                logger.disabled = True
+                try:
+                    raw = downloader(symbol, start=start, end=end, interval="1d", progress=False,
+                                     auto_adjust=True, threads=False, timeout=timeout)
+                finally:
+                    logger.disabled = old_disabled
             if raw is None or raw.empty:
                 # Yahoo's misleading "possibly delisted" text is not evidence.
                 return ProviderResult(symbol, self.name, HistoryStatus.NO_DATA, start=start, end=end,

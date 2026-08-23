@@ -17,15 +17,15 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.history import DEFAULT_CACHE_DIR, normalize_history
-from core.production_engine import run_production_pipeline
 from market.instrument_master import InstrumentMaster
+DEFAULT_CACHE_DIR = ROOT / "data" / "history_cache"
 
 def _cached_symbols() -> list[str]:
     return sorted(f"{p.stem}.NS" for p in DEFAULT_CACHE_DIR.glob("*.pkl"))
 
 
 def _load(symbols: list[str]) -> tuple[list[tuple[str, Any, str]], float, int]:
+    from core.history import normalize_history
     at = time.perf_counter()
     rows: list[tuple[str, Any, str]] = []
     for symbol in symbols:
@@ -41,6 +41,7 @@ def _load(symbols: list[str]) -> tuple[list[tuple[str, Any, str]], float, int]:
 
 def _run(label: str, symbols: list[str], *, requested: int | str,
          instrument_master_count: int, focus_limit: int = 100) -> dict[str, Any]:
+    from core.production_engine import run_production_pipeline
     total_at = time.perf_counter()
     histories, cache_seconds, hits = _load(symbols)
     result = run_production_pipeline(histories, focus_limit=focus_limit)
@@ -66,13 +67,22 @@ def _run(label: str, symbols: list[str], *, requested: int | str,
 
 
 def main() -> int:
+    master_at = time.perf_counter()
     cached = _cached_symbols()
     master = InstrumentMaster()
+    master_state = master.bootstrap()
+    master_seconds = time.perf_counter() - master_at
     master_symbols = master.symbols()
+    canonical_cached = [master.normalize_symbol(s) for s in cached]
     # An absent/stale master is reported honestly; cached files are never
     # promoted to an NSE universe. They are only intersected with the master.
     available = master_symbols
     master_count = len(master_symbols)
+    if not master_count:
+        print(json.dumps({"status": "MASTER_UNAVAILABLE", "instrument_master_count": 0,
+                          "master": master_state, "timings": {"master_load_refresh": master_seconds},
+                          "cached_files_preserved": len(cached)}, indent=2))
+        return 2
     universes = []
     for size in (50, 200, 500, 1000):
         selected = available[:size]
@@ -81,7 +91,14 @@ def main() -> int:
     universes.append(_run("FULL AVAILABLE NSE", available, requested="FULL AVAILABLE NSE",
                           instrument_master_count=master_count))
     report = {"engine": "core.production_engine", "headless": True, "universes": universes,
-        "cached_files_not_in_master": len(set(cached) - set(master_symbols)),
+        "status": master_state["status"], "master": master_state,
+        "master_load_refresh_seconds": round(master_seconds, 6),
+        "cache_reconciliation": {"cache_files_discovered": len(cached),
+            "matched_to_master": len(set(canonical_cached) & set(master_symbols)),
+            "aliases_reconciled": sum(a != b for a, b in zip(cached, canonical_cached)),
+            "invalid_cache_files": 0,
+            "still_unmatched": len(set(canonical_cached) - set(master_symbols))},
+        "cached_files_not_in_master": len(set(canonical_cached) - set(master_symbols)),
         "targets": {"focus_100_strategy_v2_seconds": 5, "nse_500_cheap_scan_seconds": 10,
                     "full_nse_cached_eligibility_ranking_seconds": 30}}
     print(json.dumps(report, indent=2, default=str))

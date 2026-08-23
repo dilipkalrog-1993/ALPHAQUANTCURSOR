@@ -8,6 +8,7 @@ from typing import Any
 from core.history import DEFAULT_CACHE_DIR as HISTORY_CACHE, load_incremental_history
 from core.production_engine import run_production_pipeline
 from discovery.structure_cache import store_structure_cache
+from market.instrument_master import InstrumentMaster
 
 ROOT = Path(__file__).resolve().parent.parent
 STRUCTURE_CACHE = ROOT / "data" / "structure_cache"
@@ -44,3 +45,14 @@ def warmup_universe(symbols: list[str], app_module: Any | None = None) -> dict[s
         "failures": [r.symbol for r in results if r.failure] + [x["symbol"] for x in production["failures"]],
         "history_cache_dir": str(HISTORY_CACHE), "structure_cache_dir": str(STRUCTURE_CACHE),
         "timings": production["timings"], "orders_sent": 0}
+
+
+def warmup_current_nse(*, refresh_master: bool = True, include_etfs: bool = False) -> dict[str, Any]:
+    """Pre-market entry point for the complete authoritative NSE universe."""
+    master = InstrumentMaster()
+    if refresh_master:
+        master.refresh_upstox(include_etfs=include_etfs)
+    report = warmup_universe(master.symbols())
+    report["instrument_master_count"] = len(master.symbols())
+    report["instrument_master_refreshed_at"] = master.refreshed_at
+    return report

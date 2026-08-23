@@ -7,7 +7,7 @@ import gzip
 import io
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 _DEFAULT_CACHE = Path(__file__).resolve().parent.parent / "data" / "instrument_master.json"
 UPSTOX_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
@@ -67,12 +67,12 @@ class InstrumentMaster:
         canonical = self.normalize_symbol(symbol)
         entry = self._cache.get("symbols", {}).get(canonical, {})
         bare = canonical.removesuffix(".NS").removesuffix(".BO")
-        return {"display_symbol": bare, "broker_symbol": entry.get("broker_symbol", bare),
+        return {"display_symbol": entry.get("display_symbol", bare), "broker_symbol": entry.get("broker_symbol", bare),
                 "historical_provider_symbol": entry.get("historical_provider_symbol", canonical),
                 "instrument_key": entry.get("instrument_key") or entry.get("upstox"),
                 "exchange": entry.get("exchange", "NSE")}
 
-    def refresh_upstox(self, *, timeout: float = 20.0) -> int:
+    def refresh_upstox(self, *, timeout: float = 20.0, include_etfs: bool = False) -> int:
         """Refresh equities from Upstox's authoritative daily instrument file."""
         import requests
         response = requests.get(UPSTOX_MASTER_URL, timeout=timeout,
@@ -80,24 +80,69 @@ class InstrumentMaster:
         response.raise_for_status()
         payload = json.load(gzip.open(io.BytesIO(response.content), "rt", encoding="utf-8"))
         symbols: dict[str, Any] = {}
+        refreshed_at = datetime.now(timezone.utc).isoformat()
         for row in payload:
             if row.get("segment") != "NSE_EQ" or row.get("instrument_type") not in {"EQ", "BE"}:
+                continue
+            # Honour explicit classifications from the source.  Do not guess
+            # from symbol suffixes: legitimate companies can contain strings
+            # such as "ETF" in their names.
+            classification = str(row.get("asset_type") or row.get("security_type") or "").upper()
+            if not include_etfs and classification in {"ETF", "EXCHANGE_TRADED_FUND"}:
+                continue
+            status = str(row.get("status") or row.get("trading_status") or "ACTIVE").upper()
+            if status in {"SUSPENDED", "DELISTED", "INACTIVE", "DISABLED", "UNTRADEABLE"}:
                 continue
             broker_symbol = str(row.get("trading_symbol") or "").upper().strip()
             if not broker_symbol:
                 continue
             historical = f"{broker_symbol}.NS"
+            instrument_key = row.get("instrument_key")
+            inferred_isin = (str(instrument_key).partition("|")[2]
+                             if str(instrument_key or "").startswith("NSE_EQ|INE") else None)
             symbols[historical] = {"display_symbol": broker_symbol, "broker_symbol": broker_symbol,
-                "historical_provider_symbol": historical, "instrument_key": row.get("instrument_key"),
-                "upstox": row.get("instrument_key"), "exchange": "NSE"}
+                "historical_provider_symbol": historical, "instrument_key": instrument_key,
+                "upstox": instrument_key, "isin": row.get("isin") or inferred_isin,
+                "sector": row.get("sector"), "industry": row.get("industry"),
+                "exchange": "NSE", "instrument_type": row.get("instrument_type"),
+                "last_instrument_master_refresh": refreshed_at}
         if not symbols:
             raise ValueError("Authoritative instrument master contained no NSE equities")
         self._cache.update(symbols=symbols, aliases=dict(NSE_SYMBOL_ALIASES),
-                           source=UPSTOX_MASTER_URL, refreshed_at=datetime.now(timezone.utc).isoformat())
+                           source=UPSTOX_MASTER_URL, refreshed_at=refreshed_at,
+                           filters={"include_etfs": include_etfs, "segment": "NSE_EQ",
+                                    "instrument_types": ["EQ", "BE"]})
         self._cache["upstox"] = {**UPSTOX_INDEX_KEYS,
             **{v["broker_symbol"]: v["instrument_key"] for v in symbols.values()}}
         self._persist()
         return len(symbols)
+
+    @property
+    def refreshed_at(self) -> str | None:
+        return self._cache.get("refreshed_at")
+
+    def equities(self) -> list[dict[str, Any]]:
+        """Return the complete persisted NSE cash-equity master, never an index seed."""
+        rows = []
+        for symbol, stored in sorted(self._cache.get("symbols", {}).items()):
+            row = {**stored, **self.canonical_mapping(symbol)}
+            row["last_instrument_master_refresh"] = (stored.get("last_instrument_master_refresh") or
+                                                       self._cache.get("refreshed_at"))
+            rows.append(row)
+        return rows
+
+    def symbols(self) -> list[str]:
+        return [row["historical_provider_symbol"] for row in self.equities()]
+
+    def search(self, query: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Search every master equity by symbol, ISIN, sector, or industry."""
+        needle = str(query or "").strip().upper()
+        rows: Iterable[dict[str, Any]] = self.equities()
+        if needle:
+            rows = (row for row in rows if any(needle in str(row.get(field) or "").upper()
+                    for field in ("display_symbol", "broker_symbol", "historical_provider_symbol",
+                                  "isin", "sector", "industry")))
+        return list(rows)[:max(0, limit)]
 
     def resolve_upstox_key(self, symbol: str) -> str | None:
         bare = str(symbol or "").upper().replace(".NS", "").replace(".BO", "")

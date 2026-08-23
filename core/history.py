@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+from pathlib import Path
+import pickle
+import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -12,6 +17,107 @@ from core.headless_pipeline import PipelineFailure
 
 REQUIRED_OHLCV = ("Open", "High", "Low", "Close", "Volume")
 REQUIRED_ROWS = 200
+DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "history_cache"
+INDICATOR_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "indicator_cache"
+_CACHE_LOCK = threading.Lock()
+
+
+@dataclass
+class HistoryFetchResult:
+    symbol: str
+    frame: pd.DataFrame
+    provider: str
+    cache_hit: bool
+    cache_seconds: float
+    provider_seconds: float
+    normalize_seconds: float
+    fetched_rows: int = 0
+    attempts: int = 0
+    failure: str | None = None
+
+    def timing_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value.pop("frame")
+        return value
+
+
+def _cache_path(symbol: str, cache_dir: Path) -> Path:
+    safe = symbol.replace(".NS", "").replace("/", "_")
+    return cache_dir / f"{safe}.pkl"
+
+
+def _atomic_pickle(path: Path, frame: pd.DataFrame) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".{threading.get_ident()}.tmp")
+    tmp.write_bytes(pickle.dumps(frame, protocol=pickle.HIGHEST_PROTOCOL))
+    tmp.replace(path)
+
+
+def load_incremental_history(
+    symbol: str, *, cache_dir: Path = DEFAULT_CACHE_DIR, timeout: float = 12.0,
+    retries: int = 2, backoff: float = 0.5, lookback_days: int = 550,
+    now: datetime | None = None, downloader: Any | None = None,
+) -> HistoryFetchResult:
+    """Cache-first history loading with a bounded, incremental provider repair.
+
+    ``downloader`` has the yfinance-compatible ``download`` signature and is
+    injectable so this behaviour can be tested without making network calls.
+    """
+    started = time.perf_counter()
+    path = _cache_path(symbol, cache_dir)
+    cached = pd.DataFrame()
+    if path.exists():
+        try:
+            cached = normalize_history(pickle.loads(path.read_bytes()))
+        except (OSError, pickle.PickleError, EOFError, AttributeError, ValueError):
+            cached = pd.DataFrame()
+    cache_seconds = time.perf_counter() - started
+    current = pd.Timestamp(now or datetime.now(timezone.utc))
+    current = (current.tz_convert(None) if current.tzinfo else current).normalize()
+    if not cached.empty:
+        last = pd.Timestamp(cached.index[-1])
+        last = (last.tz_convert(None) if last.tzinfo else last).normalize()
+    else:
+        last = None
+    # Daily data is complete enough when the cache reaches the previous UTC day.
+    required_end = current - pd.Timedelta(days=1)
+    if last is not None and last >= required_end:
+        return HistoryFetchResult(symbol, cached, "cache", True, cache_seconds, 0.0, 0.0)
+
+    if downloader is None:
+        import yfinance as yf
+        downloader = yf.download
+    start = (last + pd.Timedelta(days=1)) if last is not None else current - pd.Timedelta(days=lookback_days)
+    provider_started = time.perf_counter()
+    raw = pd.DataFrame()
+    failure = None
+    attempts = 0
+    for attempt in range(max(1, retries + 1)):
+        attempts = attempt + 1
+        try:
+            raw = downloader(symbol, start=start.strftime("%Y-%m-%d"),
+                end=(current + pd.Timedelta(days=1)).strftime("%Y-%m-%d"), interval="1d",
+                progress=False, auto_adjust=True, threads=False, timeout=timeout)
+            if raw is not None and not raw.empty:
+                break
+            failure = "EMPTY_RESPONSE"
+        except (TimeoutError, ConnectionError, OSError) as exc:
+            failure = f"{type(exc).__name__}: {exc}"
+        except Exception as exc:  # provider libraries use several request exception types
+            failure = f"{type(exc).__name__}: {exc}"
+        if attempt < retries:
+            time.sleep(min(backoff * (2 ** attempt), 2.0))
+    provider_seconds = time.perf_counter() - provider_started
+    normal_started = time.perf_counter()
+    fresh = normalize_history(raw)
+    merged = normalize_history(pd.concat([cached, fresh])) if not fresh.empty else cached
+    normalize_seconds = time.perf_counter() - normal_started
+    if not fresh.empty:
+        with _CACHE_LOCK:
+            _atomic_pickle(path, merged)
+        failure = None
+    return HistoryFetchResult(symbol, merged, "cache+yfinance" if not cached.empty else "yfinance",
+        False, cache_seconds, provider_seconds, normalize_seconds, len(fresh), attempts, failure)
 
 
 def normalize_history(raw: Any) -> pd.DataFrame:
@@ -68,6 +174,17 @@ def prepare_indicators(symbol: str, raw: Any, provider: str = "yfinance") -> tup
     if len(frame) < REQUIRED_ROWS:
         return None, PipelineFailure(stage="history_ready", reason="INSUFFICIENT_ROWS",
                                      detail=f"EMA200 requires >= {REQUIRED_ROWS} normalized rows", **base)
+    # Candle-stable indicators are shared by broad/focus scans and warmup.
+    # The key is deliberately symbol + timeframe + last completed candle.
+    candle = str(frame.index[-1]).replace(":", "-").replace("/", "-").replace(" ", "_")
+    indicator_path = INDICATOR_CACHE_DIR / f"{symbol.replace('.NS', '')}_1d_{candle}.pkl"
+    if indicator_path.exists():
+        try:
+            cached_indicators = pickle.loads(indicator_path.read_bytes())
+            if len(cached_indicators) == len(frame):
+                return cached_indicators, None
+        except (OSError, pickle.PickleError, EOFError, AttributeError, ValueError):
+            pass
     try:
         out = frame.copy()
         out["EMA20"] = out.Close.ewm(span=20, adjust=False, min_periods=20).mean()
@@ -88,6 +205,8 @@ def prepare_indicators(symbol: str, raw: Any, provider: str = "yfinance") -> tup
             return None, PipelineFailure(stage="history_ready", reason="INDICATOR_NAN",
                                          detail="Latest required indicator is NaN/non-finite",
                                          nan_columns=bad, **base)
+        with _CACHE_LOCK:
+            _atomic_pickle(indicator_path, out)
         return out, None
     except Exception as exc:
         return None, PipelineFailure(stage="history_ready", reason="CALCULATION_FAILURE",

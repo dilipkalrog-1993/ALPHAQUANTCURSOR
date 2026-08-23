@@ -66,16 +66,24 @@ class StageAudit:
                 "rejections": self.rejections, "invariant_ok": self.input == self.output + self.rejected}
 
 
-def compute_candidate(symbol: str, df: pd.DataFrame) -> Candidate | None:
-    """Create a candidate only from a real momentum/trend strategy signal."""
+def has_strategy_signal(df: pd.DataFrame) -> bool:
+    """Cheap full-strategy gate, kept separate from candidate/V2 scoring."""
     row = df.iloc[-1]
-    signal = row.Close > row.EMA20 > row.EMA50 and row.Close > row.EMA200 and 45 <= row.RSI <= 75
-    if not signal:
-        return None
+    return bool(row.Close > row.EMA20 > row.EMA50 and row.Close > row.EMA200 and 45 <= row.RSI <= 75)
+
+
+def score_candidate(symbol: str, df: pd.DataFrame) -> Candidate:
+    """Materialize the risk levels and score after a strategy has signalled."""
+    row = df.iloc[-1]
     atr = float(row.ATR)
     score = min(100.0, 50 + max(0.0, float(row.RSI)-45) + min(20, (float(row.Close/row.EMA50)-1)*200))
     return Candidate(symbol, "TREND_MOMENTUM", round(score, 2), float(row.Close),
                      round(float(row.Close)-1.5*atr, 2), round(float(row.Close)+3*atr, 2))
+
+
+def compute_candidate(symbol: str, df: pd.DataFrame) -> Candidate | None:
+    """Create a candidate only from a real momentum/trend strategy signal."""
+    return score_candidate(symbol, df) if has_strategy_signal(df) else None
 
 
 def persist_candidates(candidates: Iterable[Candidate], path: Path) -> int:

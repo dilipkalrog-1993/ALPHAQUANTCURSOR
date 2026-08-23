@@ -13,6 +13,7 @@ from execution.base import OrderIntent
 from execution.live_adapter import LiveExecutionAdapter
 from execution.paper_adapter import PaperExecutionAdapter
 from news_intelligence import NewsManager
+from core.history import load_incremental_history
 
 
 def history(rows=240, trend=True):
@@ -28,6 +29,26 @@ def history(rows=240, trend=True):
 def test_headless_validator_imports_no_streamlit_modules():
     code = "import sys,tools.run_real_nse_validation; assert not any(x=='streamlit' or x.startswith('streamlit.') for x in sys.modules)"
     subprocess.run([sys.executable,"-c",code],check=True)
+
+
+def test_benchmark_imports_no_streamlit_modules():
+    code = "import sys,tools.run_discovery_benchmark; assert not any(x=='streamlit' or x.startswith('streamlit.') for x in sys.modules)"
+    subprocess.run([sys.executable,"-c",code],check=True)
+
+
+def test_history_cache_is_incremental_and_atomic(tmp_path):
+    old = history(220)
+    (tmp_path / "ABC.pkl").write_bytes(__import__("pickle").dumps(old))
+    calls = []
+    def download(symbol, **kwargs):
+        calls.append(kwargs)
+        tail = history(2); tail.index = pd.date_range("2025-08-09", periods=2)
+        return tail
+    result = load_incremental_history("ABC.NS", cache_dir=tmp_path,
+        now=pd.Timestamp("2025-08-12", tz="UTC").to_pydatetime(), retries=0, downloader=download)
+    assert calls[0]["start"] == "2025-08-09"
+    assert result.fetched_rows == 2 and result.attempts == 1
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_history_normalization():

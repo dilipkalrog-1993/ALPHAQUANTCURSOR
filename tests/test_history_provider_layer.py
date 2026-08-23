@@ -1,4 +1,6 @@
 import json
+import logging
+import os
 import pickle
 
 import pandas as pd
@@ -95,6 +97,69 @@ def test_checkpoint_atomic_persistence_supports_resume(tmp_path):
     saved = json.loads(path.read_text())
     assert saved["completed"]["ABC.NS"]["status"] == "HISTORY_READY"
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_checkpoint_windows_permission_error_retries_then_succeeds(tmp_path, monkeypatch):
+    path = tmp_path / "checkpoint.json"
+    real_replace = os.replace
+    calls = []
+    def locked_twice(source, destination):
+        calls.append((source, destination))
+        if len(calls) < 3:
+            raise PermissionError(5, "Access is denied")
+        return real_replace(source, destination)
+    monkeypatch.setattr("core.history_service.os.replace", locked_twice)
+    assert atomic_json(path, {"completed": {}}, retry_delay=0)
+    assert len(calls) == 3 and json.loads(path.read_text()) == {"completed": {}}
+
+
+def test_checkpoint_repeated_lock_is_deferred_and_old_file_survives(tmp_path, monkeypatch):
+    path = tmp_path / "checkpoint.json"
+    path.write_text('{"old": true}')
+    monkeypatch.setattr("core.history_service.os.replace",
+                        lambda *args: (_ for _ in ()).throw(PermissionError(5, "locked")))
+    assert atomic_json(path, {"new": True}, replace_retries=2, retry_delay=0) is False
+    assert json.loads(path.read_text()) == {"old": True}
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_checkpoint_cleans_only_stale_owned_temp_files(tmp_path):
+    stale = tmp_path / "checkpoint.json.1.2.deadbeef.tmp"
+    unrelated = tmp_path / "unrelated.tmp"
+    stale.write_text("abandoned")
+    unrelated.write_text("keep")
+    os.utime(stale, (0, 0))
+    assert atomic_json(tmp_path / "checkpoint.json", {"ok": True})
+    assert not stale.exists() and unrelated.exists()
+
+
+def test_deferred_checkpoint_does_not_lose_durable_symbol_cache(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    provider = FakeProvider("YAHOO", ProviderResult("", "", HistoryStatus.SUCCESS, candles()))
+    result = HistoryService([provider], cache_dir=cache, master=master(tmp_path), retries=0).repair(
+        "ABC.NS", now=pd.Timestamp("2025-08-09", tz="UTC").to_pydatetime())
+    monkeypatch.setattr("core.history_service.os.replace",
+                        lambda *args: (_ for _ in ()).throw(PermissionError(5, "locked")))
+    assert not atomic_json(tmp_path / "checkpoint.json", {"completed": {}}, replace_retries=1)
+    assert result.rows_written and not read_cache("ABC.NS", cache).empty
+
+
+def test_yahoo_suppresses_speculative_delisted_output(capsys):
+    def noisy(*args, **kwargs):
+        import sys
+        print("$ABC.NS: possibly delisted", file=sys.stderr)
+        logging.getLogger("yfinance").error("possibly delisted")
+        return pd.DataFrame()
+    result = YahooHistoryProvider(downloader=noisy, requests_per_second=10000).fetch(
+        symbol="ABC.NS", instrument_key=None, start="2025-01-01", end="2025-02-01", timeout=1)
+    assert result.status == HistoryStatus.NO_DATA
+    assert "delisted" not in capsys.readouterr().err
+
+
+def test_checkpoint_is_written_only_by_coordinator():
+    source = open("tools/bootstrap_nse_history.py", encoding="utf-8").read()
+    assert "pool.submit(service.repair, symbol)" in source
+    assert source.index("future.result().report()") < source.index("saved = atomic_json")
 
 
 def test_benchmark_remains_cache_only():

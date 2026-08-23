@@ -89,6 +89,7 @@ from market.feed_worker import UpstoxFeedWorker
 from market.upstox_v3_feed import UpstoxV3FeedManager
 from market.analytics import refresh_market_analytics, record_entry_evaluation_latency
 from core.production_engine import run_streamlit_discovery
+from core.scoring_profiles import COMPONENTS, SAFE_BOUNDS, ScoringProfileStore, simulate
 from streamlit.components.v1 import html as component_html
 from io import StringIO
 from requests.adapters import HTTPAdapter
@@ -5634,8 +5635,12 @@ def build_ai_consensus():
                 analog_report=getattr(best, "analog_report", None),
                 news_payload=news_effect,
                 gate_threshold=fast_threshold,
+                scoring_profile=ScoringProfileStore(Path(_APP_DIR) / "data" / "scoring_profiles.json").active(),
             )
             best.trade_score_v2 = v2
+            best.scoring_profile = v2.scoring_profile
+            best.scoring_version = v2.scoring_version
+            best.scoring_weights_snapshot = dict(v2.scoring_weights_snapshot)
             best.ai_score = v2.trade_confidence
             best.ai_score_breakdown = v2.to_gate_breakdown()
             best.ai_confidence = v2.trade_confidence
@@ -5648,9 +5653,9 @@ def build_ai_consensus():
             )
             best.add_reason(
                 f"[V2] Trade Confidence={v2.trade_confidence} "
-                f"(Structure {v2.structure.weighted_contribution:.0f}/30, "
-                f"Participation {v2.participation.weighted_contribution:.0f}/20, "
-                f"Momentum {v2.momentum.weighted_contribution:.0f}/20)"
+                f"(Structure {v2.structure.weighted_contribution:.0f}/{v2.structure.weight:.0f}, "
+                f"Participation {v2.participation.weighted_contribution:.0f}/{v2.participation.weight:.0f}, "
+                f"Momentum {v2.momentum.weighted_contribution:.0f}/{v2.momentum.weight:.0f})"
             )
         else:
             batch1_bonus = signal_stock.score.get("batch1_bonus", 0)
@@ -12806,7 +12811,7 @@ def render_market_page():
 
 
 def render_configuration_page():
-    prefs=WORKSPACE.preferences; saved=dict(prefs.get("filters",{})); risk=dict(prefs.get("risk_preferences",{})); filters_tab,risk_tab,live_tab=st.tabs(["FILTERS","RISK","LIVE CASH"])
+    prefs=WORKSPACE.preferences; saved=dict(prefs.get("filters",{})); risk=dict(prefs.get("risk_preferences",{})); filters_tab,risk_tab,scoring_tab,live_tab=st.tabs(["FILTERS","RISK","SCORING","LIVE CASH"])
     with filters_tab:
         with st.form("filters_configuration"):
             a,b=st.columns(2)
@@ -12821,6 +12826,45 @@ def render_configuration_page():
             a,b=st.columns(2); capital=a.number_input("Paper capital",1.0,value=float(prefs.get("paper_trading_capital",1000000)),step=10000.0); per=b.number_input("Risk per trade (%)",0.01,100.0,float(risk.get("risk_per_trade",1.0))); positions=a.number_input("Maximum open positions",1,100,int(prefs.get("maximum_positions",10))); daily=b.number_input("Daily loss limit (%)",0.01,100.0,float(risk.get("maximum_daily_loss",3.0))); sector=a.number_input("Maximum sector exposure (%)",0.01,100.0,float(risk.get("maximum_sector_exposure",25.0))); rr=b.number_input("Minimum reward/risk",0.1,20.0,float(risk.get("minimum_reward_risk",2.0))); stop=a.selectbox("Stop-loss method",["ATR","Technical level","Percentage"]); sizing=b.selectbox("Position-sizing method",["Risk based","Fixed amount","Equal weight"]); holding=a.selectbox("Trade duration",["Intraday","Carry-forward"]); expiry=b.number_input("Signal expiry (minutes)",1,1440,int(prefs.get("signal_expiry_minutes",30)))
             if st.form_submit_button("SAVE RISK",type="primary"):
                 WORKSPACE.save(paper_trading_capital=capital,maximum_positions=positions,signal_expiry_minutes=expiry,risk_preferences={**risk,"risk_per_trade":per,"maximum_daily_loss":daily,"maximum_sector_exposure":sector,"minimum_reward_risk":rr,"stop_loss_method":stop,"position_sizing_method":sizing,"trade_duration":holding}); st.success("Risk settings saved. The pipeline was not started or restarted.")
+    with scoring_tab:
+        st.subheader("SCORING V2 · Trade Confidence")
+        st.caption("Risk Manager, reward/risk, entry gates, and the critical-news veto are separate mandatory gates and cannot be disabled here.")
+        store=ScoringProfileStore(Path(_APP_DIR)/"data"/"scoring_profiles.json"); active=store.active()
+        st.info(f"Active profile: {active.name} v{active.version} · modified {active.modified_at}")
+        mode=st.radio("Configuration detail",["BASIC","ADVANCED"],horizontal=True,key="scoring_detail_mode")
+        labels={"structure":"Structure","participation":"Participation","momentum":"Momentum","market_sector":"Market / Sector","historical":"Historical","news":"News"}
+        proposed={}; cols=st.columns(2)
+        for i,key in enumerate(COMPONENTS):
+            lo,hi=SAFE_BOUNDS[key]
+            proposed[key]=cols[i%2].number_input(labels[key],min_value=float(lo),max_value=float(hi),value=float(active.weights[key]),step=1.0,key=f"score_weight_{key}")
+        total=sum(proposed.values()); st.metric("TOTAL",f"{total:.0f} / 100")
+        if total != 100: st.error("Weights must total exactly 100 before this profile can be saved.")
+        if mode=="ADVANCED":
+            st.caption("Advanced subweights and strategy-specific distributions are stored in the versioned profile. They must remain non-negative and total their parent component.")
+            st.json({"subweights":active.subweights,"strategy_profiles":active.strategy_profiles},expanded=False)
+        quality={key:0.0 for key in COMPONENTS}
+        latest=(st.session_state.get("final_trade_list") or [None])[0]
+        score=getattr(latest,"trade_score_v2",None) if latest else None
+        if score:
+            quality={c.component:(c.weighted_contribution/c.weight if c.weight else 0) for c in score.all_components()}
+        current=simulate(quality,active.weights); comparison=simulate(quality,proposed) if total==100 else None
+        st.markdown("#### Score simulation")
+        x,y=st.columns(2); x.metric("Current Profile",current["trade_confidence"]); y.metric("Proposed Profile",comparison["trade_confidence"] if comparison else "INVALID")
+        if comparison: st.dataframe(pd.DataFrame({"Component":[labels[k] for k in COMPONENTS],"Current":[current['components'][k] for k in COMPONENTS],"Proposed":[comparison['components'][k] for k in COMPONENTS]}),hide_index=True,width="stretch")
+        profile_name=st.text_input("New profile name",value=f"{active.name} Copy",key="new_scoring_profile_name")
+        a,b,c,d=st.columns(4)
+        if a.button("SAVE AS NEW PROFILE",disabled=total!=100,key="save_new_scoring"):
+            try: store.save_new(profile_name,proposed); st.success("Profile saved with immutable version metadata.")
+            except ValueError as exc: st.error(str(exc))
+        if b.button("DUPLICATE PROFILE",key="duplicate_scoring"):
+            try: store.save_new(profile_name,dict(active.weights),duplicate_from=active.name); st.success("Profile duplicated.")
+            except ValueError as exc: st.error(str(exc))
+        if c.button("ACTIVATE PROFILE",disabled=total!=100,key="activate_scoring"):
+            try:
+                updated=store.save_version(active.name,proposed); store.activate(updated.name); st.success(f"Activated {updated.name} v{updated.version}")
+            except ValueError as exc: st.error(str(exc))
+        if d.button("RESET TO ALPHAQUANT DEFAULTS",key="reset_scoring"):
+            store.reset(); st.success("AlphaQuant Default v1 restored.")
     with live_tab:
         st.warning("LIVE TRADING USES REAL MONEY. All limits below are required before LIVE CASH GUARDED can be enabled.")
         with st.form("live_cash_configuration"):

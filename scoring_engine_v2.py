@@ -93,6 +93,9 @@ class TradeScoreV2:
     computed_at: str = ""
     gate_threshold: float = 70.0
     gate_decision: str = "PENDING"
+    scoring_profile: str = "AlphaQuant Default"
+    scoring_version: int = 1
+    scoring_weights_snapshot: dict[str, float] = field(default_factory=dict)
 
     def all_components(self) -> list[ComponentScore]:
         return [
@@ -770,6 +773,7 @@ def compute_trade_score_v2(
     news_payload: dict | None = None,
     gate_threshold: float = 70.0,
     entry_status_fn: Callable | None = None,
+    scoring_profile: Any | None = None,
 ) -> TradeScoreV2:
     """
     Compute hierarchical Trade Confidence 0–100 for a candidate.
@@ -789,13 +793,31 @@ def compute_trade_score_v2(
     result.historical = _score_historical(candidate, analog_report)
     result.news = _score_news(news_payload or {})
 
+    # Reweight the existing V2 component quality without changing any strategy,
+    # risk, R/R, news-veto, or entry gate.  The immutable snapshot travels with
+    # the score so later profile edits cannot reinterpret historical trades.
+    if scoring_profile is not None:
+        snapshot = scoring_profile.snapshot(strategy) if hasattr(scoring_profile, "snapshot") else dict(scoring_profile)
+        weights = snapshot["weights"]
+        from core.scoring_profiles import validate_weights
+        validate_weights(weights)
+        for component in result.all_components():
+            quality = component.weighted_contribution / component.weight if component.weight else 0.0
+            component.weight = float(weights[component.component])
+            component.weighted_contribution = round(min(component.weight, quality * component.weight), 2)
+        result.scoring_profile = snapshot.get("name", "Custom")
+        result.scoring_version = int(snapshot.get("version", 1))
+        result.scoring_weights_snapshot = dict(weights)
+    else:
+        result.scoring_weights_snapshot = {c.component: c.weight for c in result.all_components()}
+
     strategies = all_strategies or [strategy]
     bonus, families = _compute_confluence(strategies)
     result.confluence_bonus = bonus
     result.confluence_families = families
     if bonus > 0:
         result.structure.weighted_contribution = min(
-            WEIGHT_STRUCTURE,
+            result.structure.weight,
             result.structure.weighted_contribution + bonus,
         )
         result.structure.explanations.append(

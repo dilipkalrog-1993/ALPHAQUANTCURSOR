@@ -88,7 +88,7 @@ from market.snapshots import (
 from market.feed_worker import UpstoxFeedWorker
 from market.upstox_v3_feed import UpstoxV3FeedManager
 from market.analytics import refresh_market_analytics, record_entry_evaluation_latency
-from core.production_engine import run_streamlit_discovery
+from core.streamlit_production_adapter import run_streamlit_discovery
 from core.scoring_profiles import COMPONENTS, SAFE_BOUNDS, ScoringProfileStore, simulate
 from streamlit.components.v1 import html as component_html
 from io import StringIO

@@ -1,4 +1,8 @@
-"""Single production orchestration entry used by Streamlit and headless tools."""
+"""Pure, headless production orchestration.
+
+Application-framework adapters belong outside this backend module.  In
+particular, importing this module must never initialize or reference Streamlit.
+"""
 
 from __future__ import annotations
 
@@ -76,36 +80,4 @@ def run_production_pipeline(
             "eligibility_audit": eligibility_audit, "diagnostics": diagnostics}
 
 
-def run_streamlit_discovery(app_module: Any, **kwargs: Any) -> Any:
-    """Normalize UI history canonically, then delegate business rules to discovery."""
-    from discovery.pipeline import DiscoveryPipeline
-    source = app_module.st.session_state.market_data
-    prepared: dict[str, Any] = {}
-    failures: list[dict[str, Any]] = []
-    for symbol, raw in source.items():
-        frame, failure = prepare_indicators(symbol, raw, "streamlit market cache")
-        if failure:
-            failures.append(failure.to_dict())
-        else:
-            prepared[symbol] = frame
-    # Make downstream strategies and entry monitoring consume exactly the
-    # normalized frames counted by history_ready rather than a parallel copy.
-    app_module.st.session_state.market_data = prepared
-    result = DiscoveryPipeline(app_module).run(prepared, **kwargs)
-    diagnostics = PipelineDiagnostics()
-    reasons: dict[str, int] = {}
-    for failure in failures:
-        reasons[failure["reason"]] = reasons.get(failure["reason"], 0) + 1
-    diagnostics.record("history_ready", len(prepared), reasons)
-    diagnostics.record("eligible", result.eligible_count, result.eligibility_audit.rejections)
-    diagnostics.record("focus", result.focus_count)
-    diagnostics.record("strategy_signals", result.strategy_signals)
-    diagnostics.record("v2_qualified", result.candidates)
-    app_module.st.session_state["production_diagnostics"] = diagnostics.to_dict()
-    app_module.st.session_state["history_failures"] = failures
-    result.history_ready_count = len(prepared)
-    result.production_diagnostics = diagnostics.to_dict()
-    return result
-
-
-__all__ = ["StageAudit", "run_production_pipeline", "run_streamlit_discovery"]
+__all__ = ["StageAudit", "run_production_pipeline"]

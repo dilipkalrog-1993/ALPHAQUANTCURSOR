@@ -34,6 +34,11 @@ class HistoryFetchResult:
     fetched_rows: int = 0
     attempts: int = 0
     failure: str | None = None
+    status: str = "SUCCESS"
+    error_category: str | None = None
+    error_detail: str | None = None
+    provider_attempts: list[dict[str, Any]] | None = None
+    provider_selected: str | None = None
 
     def timing_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -96,6 +101,7 @@ def load_incremental_history(
     provider_started = time.perf_counter()
     raw = pd.DataFrame()
     failure = None
+    error_category = None
     attempts = 0
     for attempt in range(max(1, retries + 1)):
         attempts = attempt + 1
@@ -106,10 +112,15 @@ def load_incremental_history(
             if raw is not None and not raw.empty:
                 break
             failure = "EMPTY_RESPONSE"
+            error_category = "NO_DATA"
         except (TimeoutError, ConnectionError, OSError) as exc:
             failure = f"{type(exc).__name__}: {exc}"
+            from core.history_providers import classify_provider_error
+            error_category = classify_provider_error(exc).value
         except Exception as exc:  # provider libraries use several request exception types
             failure = f"{type(exc).__name__}: {exc}"
+            from core.history_providers import classify_provider_error
+            error_category = classify_provider_error(exc).value
         if attempt < retries:
             time.sleep(min(backoff * (2 ** attempt), 2.0))
     provider_seconds = time.perf_counter() - provider_started
@@ -121,8 +132,13 @@ def load_incremental_history(
         with _CACHE_LOCK:
             _atomic_pickle(path, merged)
         failure = None
-    return HistoryFetchResult(symbol, merged, "cache+yfinance" if not cached.empty else "yfinance",
-        False, cache_seconds, provider_seconds, normalize_seconds, len(fresh), attempts, failure)
+        error_category = None
+    provider = "cache+yfinance" if not cached.empty else "yfinance"
+    status = "SUCCESS" if not fresh.empty else "HISTORY_UNAVAILABLE"
+    return HistoryFetchResult(symbol, merged, provider, False, cache_seconds, provider_seconds,
+        normalize_seconds, len(fresh), attempts, failure, status, error_category, failure,
+        [{"provider": "YAHOO", "status": error_category or "SUCCESS", "attempts": attempts}],
+        "YAHOO" if not fresh.empty else None)
 
 
 def normalize_history(raw: Any) -> pd.DataFrame:

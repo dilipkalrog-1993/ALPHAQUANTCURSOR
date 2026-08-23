@@ -213,6 +213,12 @@ class InstrumentMaster:
         entry = self._cache.get("symbols", {}).get(self.normalize_symbol(symbol), {})
         return entry.get("instrument_key") or entry.get("upstox")
 
+    def authoritative_status(self, symbol: str) -> str | None:
+        """Return only an explicitly persisted exchange/provider status."""
+        entry = self._cache.get("symbols", {}).get(self.normalize_symbol(symbol), {})
+        value = entry.get("status") or entry.get("trading_status")
+        return str(value).upper() if value else None
+
     def bulk_seed_equity_symbols(self, symbols: list[str]) -> int:
         count = 0
         for symbol in symbols:

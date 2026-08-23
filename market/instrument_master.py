@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 import gzip
 import io
+import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 _DEFAULT_CACHE = Path(__file__).resolve().parent.parent / "data" / "instrument_master.json"
 UPSTOX_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
+MASTER_SCHEMA_VERSION = 2
+VALID_INSTRUMENT_TYPES = {"EQUITY", "EQ", "BE"}
 
 # Exchange renames verified against the NSE/Upstox instrument master.  Aliases
 # preserve old saved workspaces; they are not fabricated broker instrument keys.
@@ -47,6 +51,46 @@ class InstrumentMaster:
         temp.write_text(json.dumps(self._cache, indent=2), encoding="utf-8")
         temp.replace(self.cache_path)
 
+    def is_valid(self) -> bool:
+        """A master is valid only when it contains real, keyed NSE equities."""
+        symbols = self._cache.get("symbols")
+        return bool(symbols) and all(
+            str(k).endswith(".NS") and v.get("instrument_key")
+            for k, v in symbols.items()
+        )
+
+    def bootstrap(self, *, max_age_hours: float = 24, timeout: float = 20,
+                  retries: int = 2, force_refresh: bool = False,
+                  include_etfs: bool = False) -> dict[str, Any]:
+        """Load LKG first, then safely refresh a missing/stale master."""
+        had_valid = self.is_valid()
+        age = float("inf")
+        try:
+            stamp = datetime.fromisoformat(str(self.refreshed_at).replace("Z", "+00:00"))
+            age = (datetime.now(timezone.utc) - stamp).total_seconds() / 3600
+        except (TypeError, ValueError):
+            pass
+        if had_valid and not force_refresh and age <= max_age_hours:
+            return {"status": "FRESH", "count": len(self.symbols()), "refreshed": False,
+                    "metadata": self._cache.get("metadata", {})}
+        error = None
+        for attempt in range(retries + 1):
+            try:
+                count = self.refresh_upstox(timeout=timeout, include_etfs=include_etfs)
+                return {"status": "FRESH", "count": count, "refreshed": True,
+                        "metadata": self._cache.get("metadata", {})}
+            except Exception as exc:  # provider/network/schema failures are status, not data
+                error = f"{type(exc).__name__}: {exc}"
+                if attempt < retries:
+                    time.sleep(min(2 ** attempt, 4))
+        # refresh_upstox is transactional, so the in-memory/disk LKG is intact.
+        if had_valid:
+            return {"status": "STALE_FALLBACK", "count": len(self.symbols()),
+                    "refreshed": False, "error": error,
+                    "metadata": self._cache.get("metadata", {})}
+        return {"status": "MASTER_UNAVAILABLE", "count": 0, "refreshed": False,
+                "error": error, "metadata": {}}
+
     def normalize_symbol(self, symbol: str) -> str:
         sym = str(symbol or "").upper().strip()
         suffix = ".BO" if sym.endswith(".BO") else ".NS"
@@ -74,24 +118,36 @@ class InstrumentMaster:
 
     def refresh_upstox(self, *, timeout: float = 20.0, include_etfs: bool = False) -> int:
         """Refresh equities from Upstox's authoritative daily instrument file."""
-        import requests
-        response = requests.get(UPSTOX_MASTER_URL, timeout=timeout,
-                                headers={"User-Agent": "AlphaQuant/1.0"})
-        response.raise_for_status()
-        payload = json.load(gzip.open(io.BytesIO(response.content), "rt", encoding="utf-8"))
+        # This is Upstox's public daily file and intentionally requires no token.
+        request = urllib.request.Request(UPSTOX_MASTER_URL, headers={"User-Agent": "AlphaQuant/1.0"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            content = response.read()
+        payload = json.load(gzip.open(io.BytesIO(content), "rt", encoding="utf-8"))
+        if not isinstance(payload, list):
+            raise ValueError("Unexpected Upstox instrument-master schema")
         symbols: dict[str, Any] = {}
         refreshed_at = datetime.now(timezone.utc).isoformat()
+        stats = {"raw_instruments": len(payload), "nse_instruments": 0, "cash_equities": 0,
+                 "excluded_etfs": 0, "excluded_invalid_suspended": 0,
+                 "final_tradable_nse_equities": 0}
         for row in payload:
-            if row.get("segment") != "NSE_EQ" or row.get("instrument_type") not in {"EQ", "BE"}:
+            if row.get("segment") != "NSE_EQ":
                 continue
+            stats["nse_instruments"] += 1
+            instrument_type = str(row.get("instrument_type") or "").upper()
+            if instrument_type not in VALID_INSTRUMENT_TYPES:
+                continue
+            stats["cash_equities"] += 1
             # Honour explicit classifications from the source.  Do not guess
             # from symbol suffixes: legitimate companies can contain strings
             # such as "ETF" in their names.
             classification = str(row.get("asset_type") or row.get("security_type") or "").upper()
             if not include_etfs and classification in {"ETF", "EXCHANGE_TRADED_FUND"}:
+                stats["excluded_etfs"] += 1
                 continue
             status = str(row.get("status") or row.get("trading_status") or "ACTIVE").upper()
             if status in {"SUSPENDED", "DELISTED", "INACTIVE", "DISABLED", "UNTRADEABLE"}:
+                stats["excluded_invalid_suspended"] += 1
                 continue
             broker_symbol = str(row.get("trading_symbol") or "").upper().strip()
             if not broker_symbol:
@@ -108,10 +164,16 @@ class InstrumentMaster:
                 "last_instrument_master_refresh": refreshed_at}
         if not symbols:
             raise ValueError("Authoritative instrument master contained no NSE equities")
+        stats["final_tradable_nse_equities"] = len(symbols)
+        metadata = {"provider": "Upstox", "source": UPSTOX_MASTER_URL,
+                    "refresh_timestamp": refreshed_at, "instrument_count": len(payload),
+                    "cash_equity_count": len(symbols), "schema_version": MASTER_SCHEMA_VERSION,
+                    "source_status": "AUTHORITATIVE", "freshness": "FRESH", **stats}
         self._cache.update(symbols=symbols, aliases=dict(NSE_SYMBOL_ALIASES),
                            source=UPSTOX_MASTER_URL, refreshed_at=refreshed_at,
+                           metadata=metadata,
                            filters={"include_etfs": include_etfs, "segment": "NSE_EQ",
-                                    "instrument_types": ["EQ", "BE"]})
+                                    "instrument_types": sorted(VALID_INSTRUMENT_TYPES)})
         self._cache["upstox"] = {**UPSTOX_INDEX_KEYS,
             **{v["broker_symbol"]: v["instrument_key"] for v in symbols.values()}}
         self._persist()

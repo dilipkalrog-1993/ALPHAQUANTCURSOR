@@ -16,9 +16,10 @@ def test_refreshed_mapping_persists_all_canonical_fields(tmp_path, monkeypatch):
     import gzip
     payload = gzip.compress(json.dumps(rows).encode())
     class Response:
-        content = payload
-        def raise_for_status(self): pass
-    monkeypatch.setattr("requests.get", lambda *a, **k: Response())
+        def read(self): return payload
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: Response())
     master = InstrumentMaster(tmp_path / "master.json")
     assert master.refresh_upstox() == 1
     assert master.canonical_mapping("LTIM") == {

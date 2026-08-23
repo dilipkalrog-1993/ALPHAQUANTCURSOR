@@ -50,9 +50,12 @@ def warmup_universe(symbols: list[str], app_module: Any | None = None) -> dict[s
 def warmup_current_nse(*, refresh_master: bool = True, include_etfs: bool = False) -> dict[str, Any]:
     """Pre-market entry point for the complete authoritative NSE universe."""
     master = InstrumentMaster()
-    if refresh_master:
-        master.refresh_upstox(include_etfs=include_etfs)
+    state = master.bootstrap(force_refresh=refresh_master, include_etfs=include_etfs)
+    if state["status"] == "MASTER_UNAVAILABLE":
+        return {**state, "instrument_master_count": 0, "orders_sent": 0}
     report = warmup_universe(master.symbols())
     report["instrument_master_count"] = len(master.symbols())
     report["instrument_master_refreshed_at"] = master.refreshed_at
+    report["instrument_master_status"] = state["status"]
+    report["instrument_master_metadata"] = state.get("metadata", {})
     return report

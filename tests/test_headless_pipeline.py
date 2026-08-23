@@ -17,6 +17,7 @@ from news_intelligence import NewsManager
 from core.history import load_incremental_history
 from core.diagnostics import PipelineDiagnostics
 from core.production_engine import run_production_pipeline
+import scoring_engine_v2
 
 
 def history(rows=240, trend=True):
@@ -110,6 +111,25 @@ def test_genuine_computed_candidate_creation():
     assert failure is None and candidate and candidate.computed and candidate.entry==frame.Close.iloc[-1]
 
 
+def test_production_engine_invokes_authoritative_v2(monkeypatch):
+    calls = []
+    canonical = scoring_engine_v2.compute_trade_score_v2
+    def tracked(*args, **kwargs):
+        calls.append(args[1].symbol)
+        return canonical(*args, **kwargs)
+    monkeypatch.setattr(scoring_engine_v2, "compute_trade_score_v2", tracked)
+    run_production_pipeline([("REAL.NS", history(), "test")], focus_limit=1)
+    assert calls == ["REAL.NS"]
+
+
+def test_candidate_claiming_v2_contains_canonical_score_object():
+    frame, _ = prepare_indicators("REAL.NS", history())
+    candidate = compute_candidate("REAL.NS", frame)
+    assert candidate.score_version == "V2"
+    assert isinstance(candidate.trade_score_v2, scoring_engine_v2.TradeScoreV2)
+    assert candidate.trade_confidence == candidate.trade_score_v2.trade_confidence
+
+
 def test_candidate_transition_diagnostics():
     audit=StageAudit(28,20,{"NO_STRATEGY_SIGNAL":8}).to_dict()
     assert audit=={"input":28,"output":20,"rejected":8,"rejections":{"NO_STRATEGY_SIGNAL":8},"invariant_ok":True}
@@ -121,7 +141,7 @@ def test_production_pipeline_reports_active_and_obeys_discovery_funnel():
     stages = result["diagnostics"].to_dict()["stages"]
     assert stages["master"] >= stages["eligible"] >= stages["active"] >= stages["focus"]
     assert stages["active"] == len(result["active"])
-    assert stages["strategy_signals"] == stages["candidates"] == len(result["candidates"])
+    assert stages["strategy_signals"] >= stages["v2_qualified"] == stages["candidates"] == len(result["candidates"])
 
 
 def test_diagnostics_rejects_invalid_discovery_funnel_but_not_signal_cardinality():
@@ -150,7 +170,8 @@ def test_saved_filters_cannot_silently_hide_candidates():
 
 def test_v2_candidate_persistence(tmp_path):
     path=tmp_path/"candidates.json"; candidate=Candidate("A.NS","S",80,1,1,2)
-    assert persist_candidates([candidate],path)==1 and json.loads(path.read_text())[0]["computed"] is True
+    row = (persist_candidates([candidate],path), json.loads(path.read_text())[0])
+    assert row[0] == 1 and row[1]["computed"] is True and row[1]["score_version"] == "V2"
 
 
 def test_news_subsystem_failure_isolation(tmp_path,monkeypatch):

@@ -1,8 +1,8 @@
 """
-AlphaQuant Scoring Engine V2 — hierarchical 0–100 trade confidence.
+AlphaQuant Scoring Engine V2 — the authoritative 0–100 trade confidence.
 
-Separate from Risk (Brain 5), Portfolio (Brain 6), and Entry timing.
-V1 additive Fast AI remains available via scoring_engine_version preference.
+Separate from Risk (Brain 5), Portfolio (Brain 6), and Entry timing. Legacy
+scores may be displayed for old records, but are never a production path.
 """
 
 from __future__ import annotations
@@ -816,10 +816,6 @@ def compute_trade_score_v2(
     result.confluence_bonus = bonus
     result.confluence_families = families
     if bonus > 0:
-        result.structure.weighted_contribution = min(
-            result.structure.weight,
-            result.structure.weighted_contribution + bonus,
-        )
         result.structure.explanations.append(
             f"Independent signal-family confluence ({', '.join(families)}) +{bonus}"
         )

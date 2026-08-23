@@ -17,11 +17,13 @@ from core.history import prepare_indicators
 from discovery.eligibility import filter_eligible
 from discovery.focus_universe import build_focus_universe
 from discovery.opportunity_ranker import rank_eligible
+from discovery.funnel_store import DEFAULT_FUNNEL_PATH, persist_funnel
 
 
 def run_production_pipeline(
     histories: Iterable[tuple[str, Any, str]], *, focus_limit: int = 28,
     persistence_path: Path | None = None, scoring_profile: Any | None = None,
+    funnel_path: Path | None = DEFAULT_FUNNEL_PATH,
 ) -> dict[str, Any]:
     """Run history → eligibility → focus → strategy/V2 candidate → persistence."""
     histories = list(histories)
@@ -115,6 +117,35 @@ def run_production_pipeline(
     persisted = persist_candidates(candidates, persistence_path) if persistence_path is not None else len(candidates)
     persistence_seconds = time.perf_counter() - persistence_at
     diagnostics.record("persisted", persisted)
+    # One compact record per requested master symbol powers normal UI search
+    # without rerunning strategies or V2 outside Focus.
+    ranks = {row["symbol"]: index + 1 for index, row in enumerate(ranked)}
+    focus_symbols = {row["symbol"] for row in focus}
+    signal_by_symbol = {row["symbol"] for row in signalled}
+    outcomes = {row["symbol"]: row for row in signal_outcomes}
+    failure_by_symbol = {row["symbol"]: row for row in failures}
+    rejection_by_symbol = {item.symbol: None for item in candidates}
+    states = {}
+    for symbol, _raw, _provider in histories:
+        outcome = outcomes.get(symbol, {})
+        failure = failure_by_symbol.get(symbol)
+        eligible_symbol = symbol in eligible
+        states[symbol] = {
+            "symbol": symbol, "master": True, "history_ready": symbol in prepared,
+            "eligible": eligible_symbol,
+            "rejected_reason": (failure or {}).get("reason") if failure else
+                (None if eligible_symbol else "ELIGIBILITY_FILTER"),
+            "active_rank": ranks.get(symbol) if symbol in {r["symbol"] for r in active} else None,
+            "focus": symbol in focus_symbols,
+            "strategy_signal": symbol in signal_by_symbol,
+            "v2_confidence": outcome.get("trade_confidence"),
+            "v2_qualified": outcome.get("v2_qualified", False),
+            "candidate_state": outcome.get("candidate_creation_result", "NOT_REACHED"),
+            "risk_state": outcome.get("risk_status", "NOT_REACHED"),
+            "entry_state": "WAITING" if symbol in rejection_by_symbol else "NOT_REACHED",
+        }
+    if funnel_path is not None:
+        persist_funnel(states, funnel_path)
     timings = {"indicator_preparation": indicator_seconds, "eligibility": eligibility_seconds,
         "broad_ranking": ranking_seconds, "focus_selection": focus_seconds,
         "strategies": strategy_seconds, "v2_scoring": v2_seconds,
@@ -122,6 +153,7 @@ def run_production_pipeline(
     return {"candidates": candidates, "failures": failures, "prepared": prepared,
             "eligible": eligible, "active": active, "focus": focus, "focus_meta": focus_meta,
             "signal_outcomes": signal_outcomes,
+            "funnel_states": states,
             "timings": {key: round(value, 6) for key, value in timings.items()},
             "eligibility_audit": eligibility_audit, "diagnostics": diagnostics}
 
